@@ -165,6 +165,19 @@ private slots:
         QCOMPARE(doc->pageCount(), before);
     }
 
+    void undoRedoReachableFromQml() {
+        // The toolbar and Ctrl+Z call these from QML.
+        const QMetaObject *mo = &Document::staticMetaObject;
+        QVERIFY(mo->indexOfMethod("undo()") >= 0);
+        QVERIFY(mo->indexOfMethod("redo()") >= 0);
+        std::unique_ptr<Document> doc(Document::createNote());
+        doc->addStroke(doc->page(0), line({10, 10}, {50, 50}));
+        QVERIFY(QMetaObject::invokeMethod(doc.get(), "undo"));
+        QVERIFY(doc->page(0)->strokes.isEmpty());
+        QVERIFY(QMetaObject::invokeMethod(doc.get(), "redo"));
+        QCOMPARE(doc->page(0)->strokes.size(), 1);
+    }
+
     // --- Trimming ---------------------------------------------------------
     void trimsLeadingAndTrailingBlanks() {
         QTemporaryDir dir;

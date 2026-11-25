@@ -91,8 +91,8 @@ public:
     void endErase();
     bool clearPage(const PagePtr &page);
     PagePtr insertPage(int index);
-    void undo();
-    void redo();
+    Q_INVOKABLE void undo();
+    Q_INVOKABLE void redo();
 
     static quint64 newId();
 
