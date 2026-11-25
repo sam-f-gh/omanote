@@ -8,11 +8,15 @@
 #include <QTemporaryDir>
 #include <QtTest>
 #include <poppler-qt6.h>
+#include <qpdf/QPDF.hh>
+#include <qpdf/QPDFPageDocumentHelper.hh>
+#include <qpdf/QPDFWriter.hh>
 
 #include "document.h"
 #include "ink.h"
 #include "pdfstore.h"
 #include "theme.h"
+#include "tilerenderer.h"
 #include "translator.h"
 #include "viewport.h"
 
@@ -85,7 +89,7 @@ private slots:
 
     void outlineCoversStrokeWithoutHoles() {
         auto s = line({10, 10}, {100, 60});
-        const QPainterPath path = s->path();
+        const QPainterPath path = *s->path();
         QVERIFY(path.contains(QPointF(55, 35)));
         QVERIFY(!path.contains(QPointF(55, 50)));
         // A sharp hairpin must still fill solid (no winding cancellation).
@@ -93,7 +97,7 @@ private slots:
         for (int i = 0; i <= 40; ++i)
             v.samples.append({float(i < 20 ? i * 2.5 : (40 - i) * 2.5), float(i < 20 ? i * 2.5 : 50 + (i - 20) * 0.05), .5f});
         for (int i = 0; i < v.samples.size(); ++i)
-            QVERIFY(v.path().contains(v.point(i)));
+            QVERIFY(v.path()->contains(v.point(i)));
     }
 
     void eraserHitsWholeStroke() {
@@ -239,10 +243,15 @@ private slots:
         QVERIFY(qAbs(strokes[0]->samples[5].p - keep->samples[5].p) < 0.001f);
         QCOMPARE(strokes[2]->tool, Tool::Highlighter);
 
-        // The stripped source renders without the old ink.
-        Poppler::Document *raw = Poppler::Document::loadFromData(again->sourcePdf()).release();
+        // Opening rewrites nothing: the old ink is hidden through its layer.
+        QFile saved(out);
+        QVERIFY(saved.open(QIODevice::ReadOnly));
+        QCOMPARE(again->sourcePdf(), saved.readAll());
+        auto raw = Poppler::Document::loadFromData(again->sourcePdf());
+        QVERIFY(raw->page(0)->renderToImage(72, 72).pixelColor(200, 500).value() < 80);
+        TileRenderer::hideInk(*raw);
         QVERIFY(raw->page(0)->renderToImage(72, 72).pixelColor(200, 500).value() > 240);
-        delete raw;
+        QVERIFY(pageText(out, 0).contains("Hello original text"));
 
         again->beginErase();
         again->eraseLive(again->page(0), strokes[1]);
@@ -258,7 +267,7 @@ private slots:
         QVERIFY(f.open(QIODevice::ReadOnly));
         const QByteArray bytes = f.readAll();
         const QJsonObject meta = QJsonDocument::fromJson(PdfStore::metadata(bytes)).object();
-        QCOMPARE(meta.value("version").toInt(), 1);
+        QCOMPARE(meta.value("version").toInt(), 2);
         QCOMPARE(meta.value("pages").toArray()[0].toObject().value("strokes").toArray().size(), 2);
         // Saving the same document repeatedly must not grow it (no stacked overlays).
         QVERIFY(third->save(dir.path() + "/again.pdf", &error));
@@ -287,12 +296,13 @@ private slots:
         QString error;
         const QString plain = dir.path() + "/plain.pdf";
         QVERIFY(base->save(plain, &error));
-        QFile f(plain);
-        QVERIFY(f.open(QIODevice::ReadOnly));
-        QByteArray bytes = f.readAll();
-        f.close();
-        bytes.replace("/Type /Page", "/Type /Page /Rotate 90");
-        write(dir.path() + "/rot.pdf", bytes);
+        {
+            QPDF q;
+            q.processFile(plain.toLocal8Bit().constData());
+            QPDFPageDocumentHelper(q).getAllPages()[0].getObjectHandle().replaceKey("/Rotate", QPDFObjectHandle::newInteger(90));
+            QPDFWriter w(q, (dir.path() + "/rot.pdf").toLocal8Bit().constData());
+            w.write();
+        }
         std::unique_ptr<Document> doc(Document::open(dir.path() + "/rot.pdf", &error));
         QVERIFY2(doc, qPrintable(error));
         QVERIFY(doc->page(0)->size.width() > doc->page(0)->size.height());
@@ -309,6 +319,91 @@ private slots:
         QVERIFY(!Document::open(dir.path() + "/bad.pdf", &error));
         QVERIFY(!error.isEmpty());
         QVERIFY(!Document::open(dir.path() + "/missing.pdf", &error));
+    }
+
+    void samplesCodecRoundTrips() {
+        QVector<Sample> in{{0, 0, 0.5f}, {12.34f, -5.67f, 1.f}, {595.28f, 842.f, 0.f}, {595.27f, 841.99f, 0.333f}};
+        const QString data = Ink::encodeSamples(in);
+        const auto out = Ink::decodeSamples(data);
+        QCOMPARE(out.size(), in.size());
+        for (int i = 0; i < in.size(); ++i) {
+            QVERIFY(qAbs(out[i].x - in[i].x) < 0.006f);
+            QVERIFY(qAbs(out[i].y - in[i].y) < 0.006f);
+            QVERIFY(qAbs(out[i].p - in[i].p) < 0.0006f);
+        }
+        // Real strokes move in small steps: ~5 bytes a sample before base64.
+        QVector<Sample> dense;
+        for (int i = 0; i < 200; ++i)
+            dense.append({float(100 + i * 0.7), float(200 + 5 * std::sin(i * 0.2)), float(0.5 + 0.1 * std::sin(i * 0.1))});
+        QVERIFY(Ink::encodeSamples(dense).size() < dense.size() * 7); // v1 JSON: ~20
+        // Format 1 still loads.
+        auto v1 = Ink::fromJson(QJsonObject{{"id", "7"}, {"tool", "pen"}, {"color", "#000000"}, {"width", 2.5},
+                                            {"points", QJsonArray{1, 2, 0.5, 3, 4, 0.6}}});
+        QVERIFY(v1);
+        QCOMPARE(v1->samples.size(), 2);
+    }
+
+    void boundsCoverOutline() {
+        auto s = line({10, 10}, {200, 120}, Tool::Pen, 1.0f);
+        const QRectF fromPath = s->path()->boundingRect();
+        s->finalize();
+        QVERIFY(s->bounds().contains(fromPath));
+        s->releasePath();
+        QVERIFY(s->path()); // Rebuilt on demand.
+    }
+
+    void historyIsBounded() {
+        std::unique_ptr<Document> doc(Document::createNote());
+        for (int i = 0; i < Document::MaxHistory + 20; ++i)
+            doc->addStroke(doc->page(0), line({10, 10 + i * 0.1}, {50, 50}));
+        int undos = 0;
+        while (doc->canUndo()) { doc->undo(); ++undos; }
+        QCOMPARE(undos, Document::MaxHistory);
+        QVERIFY(doc->dirty()); // The oldest strokes can't be undone, so it's still changed.
+    }
+
+    void saveJobKeepsNewInkDirty() {
+        QTemporaryDir dir;
+        std::unique_ptr<Document> doc(Document::createNote());
+        doc->addStroke(doc->page(0), line({10, 10}, {50, 50}));
+        const SaveJob job = doc->prepareSave();
+        doc->addStroke(doc->page(0), line({60, 60}, {90, 90})); // Drawn while saving.
+        QString error;
+        QVERIFY(Document::writeJob(job, dir.path() + "/a.pdf", &error));
+        doc->finishSave(job, dir.path() + "/a.pdf");
+        QVERIFY(doc->dirty());
+        QVERIFY(!doc->needsSaveAs());
+        std::unique_ptr<Document> back(Document::open(dir.path() + "/a.pdf", &error));
+        QCOMPARE(back->page(0)->strokes.size(), 1);
+    }
+
+    void tileGridCoversPage() {
+        const QSizeF page(595.28, 842);
+        const double scale = 1.7;
+        const QSize grid = TileRenderer::gridSize(page, scale);
+        qint64 area = 0;
+        for (int y = 0; y < grid.height(); ++y)
+            for (int x = 0; x < grid.width(); ++x)
+                area += qint64(TileRenderer::tilePixels(page, scale, x, y).width()) *
+                        TileRenderer::tilePixels(page, scale, x, y).height();
+        QCOMPARE(area, qint64(std::ceil(page.width() * scale)) * qint64(std::ceil(page.height() * scale)));
+    }
+
+    void rendererDrawsTilesOffThread() {
+        TileRenderer renderer(2);
+        QSignalSpy spy(&renderer, &TileRenderer::rendered);
+        auto s = line({10, 10}, {200, 10}, Tool::Pen, 1.0f);
+        s->finalize();
+        renderer.setJobs({TileRenderer::Job{1, -1, {595.28, 842}, 1.0, 0, 0, 3, {s}},
+                          TileRenderer::Job{1, -1, {595.28, 842}, 1.0, 1, 1, 3, {s}}});
+        QTRY_COMPARE(spy.size(), 2);
+        for (const auto &args : spy) {
+            const QImage img = args.at(5).value<QImage>();
+            const int tx = args.at(2).toInt();
+            QCOMPARE(img.size(), TileRenderer::tilePixels({595.28, 842}, 1.0, tx, args.at(3).toInt()).size());
+            if (tx == 0)
+                QVERIFY(img.pixelColor(100, 10).value() < 80);
+        }
     }
 
     // --- Viewport ----------------------------------------------------------

@@ -83,7 +83,7 @@ Item {
 
     Label {
         id: status
-        anchors { left: parent.left; bottom: parent.bottom; margins: 16; right: zoomPill.left; rightMargin: 16 }
+        anchors { left: parent.left; bottom: parent.bottom; margins: 16 }
         elide: Text.ElideRight
         color: theme.foreground
         opacity: 0

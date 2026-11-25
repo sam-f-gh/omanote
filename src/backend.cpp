@@ -1,6 +1,9 @@
 #include "backend.h"
 
 #include <QColor>
+#include <QFutureWatcher>
+#include <QtConcurrent>
+#include "pdfstore.h"
 #include <QFileInfo>
 #include <QUrl>
 #include <algorithm>
@@ -94,22 +97,38 @@ void Backend::openDialog() {
     m_picker->openPdf();
 }
 
+// Parsing runs on a worker so a big PDF never freezes the window; the
+// result is applied only if nothing newer was asked for meanwhile.
 bool Backend::openFile(const QString &pathOrUrl) {
     const QUrl url(pathOrUrl);
     const QString path = url.isLocalFile() ? url.toLocalFile() : pathOrUrl;
-    QString message;
-    Document *doc = Document::open(path, &message);
-    if (!doc) {
-        // Errors surface in the window: inline on the start screen, as a
-        // status line over an open document.
-        if (m_doc)
-            emit status(message);
-        else
-            setError(message);
-        return false;
-    }
-    clearError();
-    setDocument(doc);
+    const int ticket = ++m_openTicket;
+    setBusy(true);
+    struct Result { bool ok; PdfStore::Loaded loaded; QString error; };
+    auto *watcher = new QFutureWatcher<Result>(this);
+    connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, path, ticket] {
+        watcher->deleteLater();
+        if (ticket != m_openTicket)
+            return;
+        setBusy(false);
+        Result r = watcher->result();
+        if (!r.ok) {
+            // Errors surface in the window: inline on the start screen, as a
+            // status line over an open document.
+            if (m_doc)
+                emit status(r.error);
+            else
+                setError(r.error);
+            return;
+        }
+        clearError();
+        setDocument(Document::fromLoaded(path, r.loaded));
+    });
+    watcher->setFuture(QtConcurrent::run([path] {
+        Result r;
+        r.ok = PdfStore::load(path, r.loaded, r.error);
+        return r;
+    }));
     return true;
 }
 
@@ -137,18 +156,38 @@ void Backend::saveAs() {
     m_picker->savePdf(suggestion);
 }
 
+// The PDF is built and written on a worker from a snapshot, so saving a
+// big notebook never stalls the pen; ink added meanwhile stays unsaved.
 bool Backend::saveTo(const QString &path) {
-    if (!m_doc)
+    if (!m_doc || m_saving)
         return false;
-    QString message;
-    if (!m_doc->save(path, &message)) {
-        emit status(message);
-        emit saveCancelled();
-        return false;
-    }
-    emit titleChanged();
-    emit status(tr("Saved %1").arg(QFileInfo(path).fileName()));
-    emit saved();
+    m_saving = true;
+    setBusy(true);
+    const SaveJob job = m_doc->prepareSave();
+    QPointer<Document> doc = m_doc;
+    struct Result { bool ok; QString error; };
+    auto *watcher = new QFutureWatcher<Result>(this);
+    connect(watcher, &QFutureWatcher<Result>::finished, this, [this, watcher, job, path, doc] {
+        watcher->deleteLater();
+        m_saving = false;
+        setBusy(false);
+        const Result r = watcher->result();
+        if (!r.ok) {
+            emit status(r.error);
+            emit saveCancelled();
+            return;
+        }
+        if (doc)
+            doc->finishSave(job, path);
+        emit titleChanged();
+        emit status(tr("Saved %1").arg(QFileInfo(path).fileName()));
+        emit saved();
+    });
+    watcher->setFuture(QtConcurrent::run([job, path] {
+        Result r;
+        r.ok = Document::writeJob(job, path, &r.error);
+        return r;
+    }));
     return true;
 }
 

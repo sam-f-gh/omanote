@@ -29,12 +29,22 @@ struct Stroke {
 
     QPointF point(int i) const { return {samples[i].x, samples[i].y}; }
     float radius(int i) const;
-    const QPainterPath &path() const;
+    // The filled outline. Safe to call from render threads: the cache is
+    // swapped atomically, and it can be dropped to save memory any time.
+    std::shared_ptr<const QPainterPath> path() const;
+    void releasePath() const;
+    // Covers the outline; cheap (from samples), so hit tests and tile
+    // culling never need the path. Precomputed by finalize().
     QRectF bounds() const;
-    void invalidate() { m_path.reset(); }
+    // Called once a stroke is committed: from then on it is immutable and
+    // may be shared with render threads.
+    void finalize();
+    void invalidate();
 
 private:
-    mutable std::shared_ptr<QPainterPath> m_path;
+    mutable std::shared_ptr<const QPainterPath> m_path;
+    QRectF m_bounds;
+    bool m_finalized = false;
 };
 
 using StrokePtr = std::shared_ptr<Stroke>;
@@ -65,6 +75,9 @@ double segmentDistance(QPointF a, QPointF b, QPointF c, QPointF d);
 
 QJsonObject toJson(const Stroke &stroke);
 StrokePtr fromJson(const QJsonObject &object);
+// Samples as delta-coded varints in base64: ~4 bytes a sample instead of ~20.
+QString encodeSamples(const QVector<Sample> &samples);
+QVector<Sample> decodeSamples(const QString &data);
 
 // PDF content-stream operators for a path (m/l/c/h), two decimals.
 QByteArray pdfPath(const QPainterPath &path);

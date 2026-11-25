@@ -4,22 +4,26 @@
 #include <QHash>
 #include <QImage>
 #include <QPointer>
-#include <QQuickPaintedItem>
+#include <QQuickItem>
 #include <QTimer>
 
 #include "document.h"
-#include "pagerenderer.h"
+#include "tilerenderer.h"
 #include "viewport.h"
 
 class QTabletEvent;
+class QSGImageNode;
+class QSGRectangleNode;
+class LiveLayer;
 
 // The workspace: white pages on the themed backdrop, live ink, and every
 // input path (stylus, touch, mouse, wheel, touchpad pinch).
 //
-// Committed ink is cached per page as one composited image at the current
-// scale; the stroke being drawn is painted on top and only its dirty region
-// is repainted per sample, so 240 Hz pens stay cheap however full the page.
-class NoteView : public QQuickPaintedItem {
+// Pages are scene-graph textures, rendered in tiles on worker threads, so
+// scrolling and zooming are GPU transforms with no repainting. The stroke
+// being drawn lives on a small painted overlay updated segment by segment,
+// and stays there until the tiles that include it arrive.
+class NoteView : public QQuickItem {
     Q_OBJECT
     Q_PROPERTY(Document *document READ document WRITE setDocument NOTIFY documentChanged)
     Q_PROPERTY(int tool READ tool WRITE setTool NOTIFY toolChanged)
@@ -48,6 +52,8 @@ public:
     int pageCount() const { return m_view.pageCount(); }
     bool eraserEngaged() const;
     const Viewport &viewport() const { return m_view; }
+    // True once every visible tile shows the current ink (for tests).
+    bool tilesCurrent() const;
 
     Q_INVOKABLE void zoomIn();
     Q_INVOKABLE void zoomOut();
@@ -60,8 +66,6 @@ public:
     Q_INVOKABLE bool clearCurrentPage();
     Q_INVOKABLE bool currentPageHasInk() const;
 
-    void paint(QPainter *painter) override;
-
 signals:
     void documentChanged();
     void toolChanged();
@@ -71,6 +75,9 @@ signals:
     void interacted();  // Any new gesture; transient status hides on it.
 
 protected:
+    QSGNode *updatePaintNode(QSGNode *oldNode, UpdatePaintNodeData *) override;
+    void releaseResources() override;
+    void itemChange(ItemChange change, const ItemChangeData &value) override;
     bool event(QEvent *event) override;
     bool eventFilter(QObject *watched, QEvent *event) override;
     void geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) override;
@@ -88,14 +95,18 @@ private:
     enum class Gesture { None, Ink, Erase, Pan, VerticalPan, Pinch };
     enum class Source { None, Stylus, Mouse, Touch };
 
-    struct Cache {
-        QImage background;       // Poppler render, white paper otherwise.
-        double backgroundScale = 0;
-        double requestedScale = 0;
-        QImage composite;        // Background + committed ink.
-        double compositeScale = 0;
-        int compositeRevision = -1;
-        double compositeBackground = -1;
+    struct Tile {
+        double scale = 0;
+        int tx = 0, ty = 0;
+        int revision = -1;        // Ink revision shown; -1 = nothing yet.
+        int requested = -1;       // Revision asked of the renderer.
+        bool blank = false;       // Plain white paper: no texture needed.
+        QImage image;             // Waiting for upload, then dropped.
+        quint64 serial = 0;       // Bumped per new image.
+    };
+    struct PageTiles {
+        int revision = 0;
+        QList<Tile> tiles;
     };
 
     void tabletEvent(QTabletEvent *event, QPointF pos);
@@ -107,6 +118,8 @@ private:
     void beginPan(QPointF pos, Gesture kind, Source source);
     void panTo(QPointF pos);
     void endPan();
+    void stopFling() { m_flinging = false; }
+    void flingFrame();
     bool touchBlocked() const;
     void setHover(QPointF pos, bool visible);
     void setEraseEngaged(bool on);
@@ -115,29 +128,56 @@ private:
     void viewMoved();
     void zoomTo(double zoom, QPointF focus);
     void scheduleRenders();
-    void onRendered(quint64 key, double scale, const QImage &image, int generation);
-    void onPageChanged(quint64 id);
+    void onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation);
+    void onPageChanged(quint64 id, const QRectF &region);
+    void resetTiles();
     double deviceRatio() const;
-    double backgroundScaleFor(const Page &page) const;
+    double targetScale() const;
     bool needsBackground(const Page &page) const;
+    QRect tileRange(int index, double scale, double margin) const;
     QRectF snapped(QRectF r) const;
-    void paintPage(QPainter &p, int index, const QRectF &rect);
-    void buildComposite(const Page &page, Cache &cache, double scale);
     QRectF strokeScreenRect(int fromSample) const;
     void drawLive(int fromSample);
+    void clearLive();
+    void maybeClearLive();
     QColor activeColor(Tool tool) const;
     double activeWidth(Tool tool) const;
 
     QPointer<Document> m_doc;
     Viewport m_view;
-    PageRenderer m_renderer;
-    QHash<quint64, Cache> m_cache;
+    TileRenderer m_renderer;
+    QHash<quint64, PageTiles> m_tiles;
+    LiveLayer *m_overlay = nullptr;
     bool m_needsInitialZoom = true;
     bool m_zooming = false;
     bool m_fitMode = false;  // Keep fit-width as the window is resized.
     QTimer m_zoomSettle;
-    QTimer m_fling;
+    QTimer m_scheduleTimer;  // Coalesces render scheduling to once per event batch.
+
+    // Scene-graph nodes, touched only in updatePaintNode (GUI blocked).
+    struct NodeKey {
+        quint64 page; qint64 scale; int tx, ty;
+        bool operator==(const NodeKey &o) const { return page == o.page && scale == o.scale && tx == o.tx && ty == o.ty; }
+    };
+    friend size_t qHash(const NodeKey &k, size_t seed) { return qHashMulti(seed, k.page, k.scale, k.tx, k.ty); }
+    struct NodeEntry { QSGImageNode *node = nullptr; quint64 serial = 0; };
+    QHash<NodeKey, NodeEntry> m_nodes;
+    // A stable tree, so the renderer keeps its batches between frames:
+    // root > backdrop, then per page: shadow/border/paper rects, stand-in
+    // tiles (other scales), current tiles. Frames mostly just move rects.
+    struct PageNode {
+        QSGNode *group = nullptr;
+        QSGRectangleNode *rects[6] = {};
+        QSGNode *standIns = nullptr;
+        QSGNode *current = nullptr;
+    };
+    QHash<quint64, PageNode> m_pageNodes;
+    QSGRectangleNode *m_backdropNode = nullptr;
+
+    // Kinetic scrolling, stepped once per rendered frame.
+    bool m_flinging = false;
     QPointF m_flingVelocity;
+    QElapsedTimer m_flingClock;
 
     Tool m_tool = Tool::Pen;
     QColor m_penColor{0x18, 0x18, 0x1c};
@@ -151,20 +191,16 @@ private:
     PagePtr m_strokePage;
     StrokePtr m_stroke;
     double m_smoothedPressure = 0.5;
-    // The stroke being drawn, rendered opaque into a view-sized layer one
-    // tail at a time, so each sample costs the same however long the stroke.
-    // Highlighters get their alpha and multiply when the layer is composited.
-    QImage m_live;
-    QRectF m_liveDirty;
-    double m_liveZoom = 0;
-    QPointF m_liveOrigin;
     QPointF m_last;
-    QPointF m_lastEraseDoc;
-    int m_erasePage = -1;
     QElapsedTimer m_panClock;
     QPointF m_panVelocity;
 
-    // Pinch state.
+    // Live-layer bookkeeping: where it was drawn, and which page revision
+    // the tiles must reach before it can be cleared.
+    double m_liveZoom = 0;
+    QPointF m_liveOrigin;
+    QHash<quint64, int> m_pending; // Page -> revision the tiles must reach.
+
     double m_pinchStartZoom = 1, m_pinchStartDistance = 1;
     QPointF m_pinchCentroid;
     bool m_touchIgnored = false;
@@ -174,9 +210,5 @@ private:
     bool m_stylusNear = false;
     bool m_stylusDown = false;
     QElapsedTimer m_stylusClock;
-    bool m_eraseButton = false;
     bool m_eraseEngaged = false;
-
-    QPointF m_hover;
-    bool m_hoverVisible = false;
 };

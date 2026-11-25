@@ -79,6 +79,8 @@ private:
     QString m_error;
     bool m_busy = false;
     bool m_awaitingSave = false;
+    bool m_saving = false;
+    int m_openTicket = 0;
     QSettings m_settings;
     int m_tool = 0;
     QString m_penColor = "#18181c";

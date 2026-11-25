@@ -54,8 +54,23 @@ Theme::Theme(const QString &directory, QObject *parent, const QString &hyprctl)
     });
     m_roundingPoll.setInterval(1000);
     connect(&m_roundingPoll, &QTimer::timeout, this, &Theme::refreshRounding);
-    if (!m_hyprctl.isEmpty())
-        m_roundingPoll.start();
+    if (!hyprctl.isEmpty()) {
+        m_roundingPoll.start(); // Tests inject a fake hyprctl and poll it.
+    } else if (!m_hyprctl.isEmpty()) {
+        // Rounding only changes when Hyprland reloads its config, which it
+        // announces on its event socket: no polling, no idle wakeups.
+        connect(&m_events, &QLocalSocket::readyRead, this, [this] {
+            while (m_events.canReadLine())
+                if (m_events.readLine().startsWith("configreloaded"))
+                    refreshRounding();
+        });
+        connect(&m_events, &QLocalSocket::disconnected, this, [this] { m_reconnect.start(); });
+        connect(&m_events, &QLocalSocket::errorOccurred, this, [this] { m_reconnect.start(); });
+        m_reconnect.setSingleShot(true);
+        m_reconnect.setInterval(5000);
+        connect(&m_reconnect, &QTimer::timeout, this, &Theme::connectEvents);
+        connectEvents();
+    }
     reload();
 }
 
@@ -64,6 +79,14 @@ Theme::~Theme() {
         m_roundingProcess.kill();
         m_roundingProcess.waitForFinished(1000);
     }
+}
+
+void Theme::connectEvents() {
+    const QString socket = qEnvironmentVariable("XDG_RUNTIME_DIR") + "/hypr/" +
+                           qEnvironmentVariable("HYPRLAND_INSTANCE_SIGNATURE") + "/.socket2.sock";
+    m_events.abort();
+    m_events.connectToServer(socket, QIODevice::ReadOnly);
+    refreshRounding(); // Whatever changed while we weren't listening.
 }
 
 void Theme::refreshRounding() {

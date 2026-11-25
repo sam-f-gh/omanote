@@ -62,6 +62,18 @@ bin/install               # makepkg -fsi, adds it to the launcher
 ## Layout
 
 `src/ink` stroke geometry (one outline for screen and PDF), `src/document`
-pages and undo, `src/pdfstore` qpdf load/strip/save, `src/viewport` pan and
-zoom math, `src/pagerenderer` async poppler, `src/noteview` the canvas and
-input, `src/backend` open/save flows, QML for the chrome.
+pages and bounded undo, `src/pdfstore` qpdf load/strip/save, `src/viewport`
+pan and zoom math, `src/tilerenderer` worker-thread tiles (poppler + ink),
+`src/noteview` the GPU canvas, live-ink overlay and input, `src/backend`
+async open/save, QML for the chrome.
+
+## Performance notes
+
+- Pages are 512 px tiles uploaded once as GPU textures: scrolling and pinch
+  are pure transforms. Ink edits re-render only the tiles they touch, off
+  the GUI thread; CPU copies are dropped after upload.
+- The stroke being drawn costs the same per sample however long it gets.
+- Opening never rewrites the PDF (old ink is hidden via its layer); open and
+  save run on workers. Stroke data is varint-coded (format 2; format 1 loads).
+- No polling: theme via file watches, rounding via Hyprland's event socket,
+  fling stepped per presented frame.

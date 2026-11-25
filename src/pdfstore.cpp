@@ -145,9 +145,25 @@ void strip(QPDF &q) {
     }
 }
 
+// Viewers (and poppler's layer model) list layers from /D /Order.
+bool layerToggleable(QPDF &q) {
+    QOH oc = q.getRoot().getKey("/OCProperties");
+    if (!oc.isDictionary() || !oc.getKey("/D").isDictionary())
+        return false;
+    QOH order = oc.getKey("/D").getKey("/Order");
+    if (!order.isArray())
+        return false;
+    for (auto &item : order.getArrayAsVector())
+        if (ours(item))
+            return true;
+    return false;
+}
+
 QByteArray writeMemory(QPDF &q) {
     QPDFWriter writer(q);
     writer.setOutputMemory();
+    // Object streams pack the many small dictionaries tightly.
+    writer.setObjectStreamMode(qpdf_o_generate);
     writer.write();
     auto buf = writer.getBufferSharedPointer();
     return QByteArray(reinterpret_cast<const char *>(buf->getBuffer()), qsizetype(buf->getSize()));
@@ -162,7 +178,7 @@ QByteArray rgb(const QColor &c) {
 QOH layer(QPDF &q) {
     QOH ocg = QOH::newDictionary();
     ocg.replaceKey("/Type", QOH::newName("/OCG"));
-    ocg.replaceKey("/Name", QOH::newUnicodeString("Omanote Ink"));
+    ocg.replaceKey("/Name", QOH::newUnicodeString(LayerName));
     ocg.replaceKey(Marker, QOH::newBool(true));
     ocg = q.makeIndirectObject(ocg);
 
@@ -201,10 +217,10 @@ void addInk(QPDF &q, QPDFPageObjectHelper &page, const QList<StrokePtr> &strokes
                          " re W n\n";
     for (const auto &s : strokes)
         if (s->tool == Tool::Highlighter)
-            content += "q /OmHL gs\n" + rgb(s->color) + Ink::pdfPath(s->path()) + "f\nQ\n";
+            content += "q /OmHL gs\n" + rgb(s->color) + Ink::pdfPath(*s->path()) + "f\nQ\n";
     for (const auto &s : strokes)
         if (s->tool != Tool::Highlighter)
-            content += rgb(s->color) + Ink::pdfPath(s->path()) + "f\n";
+            content += rgb(s->color) + Ink::pdfPath(*s->path()) + "f\n";
     content += "Q\n";
 
     QOH form = q.newStream(content.toStdString());
@@ -318,7 +334,9 @@ bool loadBytes(const QByteArray &bytes, Loaded &out, QString &error) {
             }
             out.pages.append(data);
         }
-        if (omanote || ourInfo(q).isDictionary()) {
+        // Old ink is hidden at render time through its layer. Only if a
+        // foreign tool broke the layer wiring is a stripped copy needed.
+        if ((omanote || ourInfo(q).isDictionary()) && !layerToggleable(q)) {
             strip(q);
             out.pdf = writeMemory(q);
         } else {

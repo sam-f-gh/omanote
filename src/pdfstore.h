@@ -10,10 +10,11 @@
 // Non-destructive PDF persistence through qpdf. Original page content is
 // kept as is; Omanote adds, per page, one tagged Form XObject (in an "Omanote
 // Ink" optional-content layer) that any viewer draws, plus versioned stroke
-// JSON in the catalog's /PieceInfo. Loading strips both again, so re-saving
-// replaces the old ink instead of stacking ghost copies on top of it.
+// data in the catalog's /PieceInfo. Every save strips the previous ink first,
+// so re-saving replaces it instead of stacking ghost copies on top.
 namespace PdfStore {
-constexpr int FormatVersion = 1;
+constexpr int FormatVersion = 2;  // 2: samples as compact varint data.
+constexpr char LayerName[] = "Omanote Ink";
 
 struct PageData {
     QSizeF size;               // Displayed size in points (crop box, rotated).
@@ -23,7 +24,10 @@ struct PageData {
 };
 
 struct Loaded {
-    QByteArray pdf;            // Source with Omanote ink stripped: render and re-save from this.
+    // The file as is. Old Omanote ink in it sits in the "Omanote Ink" layer,
+    // which the renderer hides and every save strips, so nothing is
+    // rewritten just to open a file.
+    QByteArray pdf;
     QList<PageData> pages;
     bool omanote = false;      // Carried Omanote stroke data.
     QString origin = "external";

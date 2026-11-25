@@ -4,18 +4,21 @@
 #include <QNativeGestureEvent>
 #include <QPainter>
 #include <QPointingDevice>
+#include <QQuickPaintedItem>
 #include <QQuickWindow>
+#include <QSGImageNode>
+#include <QSGNode>
+#include <QSGRectangleNode>
+#include <QSGTexture>
 #include <QTabletEvent>
 #include <QtMath>
 #include <algorithm>
 #include <cmath>
 
 namespace {
-// Page caches above this many pixels fall back to a capped background with
-// ink drawn as vectors, so 400 % zoom on a big page can't eat a gigabyte.
-constexpr double MaxPagePixels = 16e6;
 constexpr int PalmGraceMs = 200;
 constexpr int HoverTrustMs = 1500;
+constexpr int LayerIdleMs = 15000;
 
 bool realMouse(const QPointerEvent *e) {
     const auto type = e->device() ? e->device()->type() : QInputDevice::DeviceType::Mouse;
@@ -25,32 +28,125 @@ bool realMouse(const QPointerEvent *e) {
 double length(QPointF p) { return std::hypot(p.x(), p.y()); }
 }
 
-NoteView::NoteView(QQuickItem *parent) : QQuickPaintedItem(parent) {
-    setOpaquePainting(true);
+// The transparent layer above the pages: the stroke being drawn (and ones
+// just committed, until their tiles arrive) plus the eraser ring. Strokes are
+// drawn opaque, pens and highlighters on separate images, so overlapping
+// segments never darken; highlighters get their alpha when composited.
+class LiveLayer : public QQuickPaintedItem {
+public:
+    explicit LiveLayer(QQuickItem *parent) : QQuickPaintedItem(parent) {
+        setAcceptedMouseButtons(Qt::NoButton);
+        setFillColor(Qt::transparent);
+        m_idle.setSingleShot(true);
+        m_idle.setInterval(LayerIdleMs);
+        // Two view-sized images are a lot to hold for nothing; let go of
+        // them once the pen has rested a while.
+        QObject::connect(&m_idle, &QTimer::timeout, this, [this] {
+            if (dirty.isEmpty()) {
+                pen = QImage();
+                highlight = QImage();
+            }
+        });
+    }
+
+    QImage &layer(Tool tool, double dpr) {
+        QImage &img = tool == Tool::Highlighter ? highlight : pen;
+        const QSize size(int(std::ceil(width() * dpr)), int(std::ceil(height() * dpr)));
+        if (img.size() != size || img.devicePixelRatio() != dpr) {
+            img = QImage(size, QImage::Format_ARGB32_Premultiplied);
+            img.setDevicePixelRatio(dpr);
+            img.fill(Qt::transparent);
+        }
+        m_idle.start();
+        return img;
+    }
+
+    void clear() {
+        for (QImage *img : {&pen, &highlight}) {
+            if (img->isNull())
+                continue;
+            QPainter p(img);
+            p.setCompositionMode(QPainter::CompositionMode_Source);
+            p.fillRect(dirty, Qt::transparent);
+        }
+        const QRect old = dirty.toAlignedRect();
+        dirty = {};
+        refresh(old);
+        m_idle.start();
+    }
+
+    // An empty overlay is hidden, so the scene graph skips it entirely.
+    void refresh(const QRect &rect) {
+        const bool show = !dirty.isEmpty() || hoverVisible;
+        if (show != isVisible()) {
+            setVisible(show);
+            // Coming back: repaint all of it, or pixels from before it was
+            // hidden would reappear. An explicit full rect, because a bare
+            // update() gets narrowed by partial ones later in the frame.
+            if (show)
+                update(QRect(0, 0, int(std::ceil(width())), int(std::ceil(height()))));
+            return;
+        }
+        if (show)
+            update(rect);
+    }
+
+    void paint(QPainter *p) override {
+        p->setCompositionMode(QPainter::CompositionMode_Source);
+        p->fillRect(QRectF(0, 0, width(), height()), Qt::transparent);
+        p->setCompositionMode(QPainter::CompositionMode_SourceOver);
+        if (!highlight.isNull() && !dirty.isEmpty()) {
+            p->save();
+            p->setOpacity(Ink::HighlightAlpha);
+            p->drawImage(QPointF(0, 0), highlight);
+            p->restore();
+        }
+        if (!pen.isNull() && !dirty.isEmpty())
+            p->drawImage(QPointF(0, 0), pen);
+        if (hoverVisible) {
+            p->setRenderHint(QPainter::Antialiasing);
+            p->setBrush(Qt::NoBrush);
+            p->setPen(QPen(QColor(255, 255, 255, 200), 3));
+            p->drawEllipse(hover, hoverRadius, hoverRadius);
+            QPen dash(QColor(40, 40, 46), 1.25, Qt::DashLine);
+            dash.setDashPattern({3, 3});
+            p->setPen(dash);
+            p->drawEllipse(hover, hoverRadius, hoverRadius);
+        }
+    }
+
+    QImage pen, highlight;
+    QRectF dirty;
+    QPointF hover;
+    bool hoverVisible = false;
+    double hoverRadius = 0;
+
+private:
+    QTimer m_idle;
+};
+
+NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
+    setFlag(ItemHasContents);
+    setClip(true); // Pages scrolled past the edge must not cover the chrome.
     setAcceptTouchEvents(true);
     setAcceptHoverEvents(true);
     setAcceptedMouseButtons(Qt::LeftButton | Qt::MiddleButton);
-    setFlag(ItemIsFocusScope, false);
+
+    m_overlay = new LiveLayer(this);
+    m_overlay->setZ(1);
+    m_overlay->setVisible(false);
 
     m_zoomSettle.setSingleShot(true);
     m_zoomSettle.setInterval(140);
     connect(&m_zoomSettle, &QTimer::timeout, this, [this] {
         m_zooming = false;
         scheduleRenders();
-        update();
     });
+    m_scheduleTimer.setSingleShot(true);
+    m_scheduleTimer.setInterval(0);
+    connect(&m_scheduleTimer, &QTimer::timeout, this, &NoteView::scheduleRenders);
 
-    m_fling.setInterval(16);
-    connect(&m_fling, &QTimer::timeout, this, [this] {
-        const double y = m_view.scrollY(), x = m_view.panX();
-        m_view.panBy(m_flingVelocity.x() * 16, m_flingVelocity.y() * 16);
-        m_flingVelocity *= 0.94;
-        if (length(m_flingVelocity) < 0.02 || (y == m_view.scrollY() && x == m_view.panX()))
-            m_fling.stop();
-        viewMoved();
-    });
-
-    connect(&m_renderer, &PageRenderer::rendered, this, &NoteView::onRendered);
+    connect(&m_renderer, &TileRenderer::rendered, this, &NoteView::onRendered);
     // Proximity events go to the application, not to items.
     qApp->installEventFilter(this);
 }
@@ -65,11 +161,12 @@ void NoteView::setDocument(Document *doc) {
     if (m_doc)
         disconnect(m_doc, nullptr, this, nullptr);
     m_doc = doc;
-    m_cache.clear();
+    m_tiles.clear();
     m_stroke.reset();
     m_strokePage.reset();
     m_gesture = Gesture::None;
     m_source = Source::None;
+    clearLive();
     m_renderer.setPdf(doc ? doc->sourcePdf() : QByteArray());
     if (doc) {
         connect(doc, &Document::pagesChanged, this, &NoteView::syncPages);
@@ -85,7 +182,7 @@ void NoteView::setTool(int tool) {
     if (t == m_tool)
         return;
     m_tool = t;
-    setHover(m_hover, m_hoverVisible && m_tool == Tool::Eraser);
+    setHover(m_overlay->hover, m_overlay->hoverVisible && m_tool == Tool::Eraser);
     emit toolChanged();
 }
 
@@ -114,6 +211,8 @@ double NoteView::activeWidth(Tool tool) const { return tool == Tool::Highlighter
 void NoteView::zoomTo(double zoom, QPointF focus) {
     m_view.zoomAt(zoom, focus);
     m_fitMode = std::abs(m_view.zoom() - m_view.fitWidthZoom()) < 1e-3;
+    // While zooming, existing tiles are simply scaled on the GPU; sharp ones
+    // are rendered once the gesture settles.
     m_zooming = true;
     m_zoomSettle.start();
     viewMoved();
@@ -129,7 +228,7 @@ void NoteView::toggleZoom() {
 }
 
 void NoteView::goToPage(int index) {
-    m_fling.stop();
+    stopFling();
     m_view.scrollToPage(std::clamp(index, 0, std::max(0, m_view.pageCount() - 1)));
     viewMoved();
 }
@@ -152,7 +251,7 @@ bool NoteView::currentPageHasInk() const {
     return page && page->hasInk();
 }
 
-// --- Layout & caches --------------------------------------------------------
+// --- Layout -----------------------------------------------------------------
 
 void NoteView::syncPages() {
     QList<QSizeF> sizes;
@@ -163,8 +262,8 @@ void NoteView::syncPages() {
             ids.insert(p->id);
         }
     }
-    for (auto it = m_cache.begin(); it != m_cache.end();)
-        it = ids.contains(it.key()) ? std::next(it) : m_cache.erase(it);
+    for (auto it = m_tiles.begin(); it != m_tiles.end();)
+        it = ids.contains(it.key()) ? std::next(it) : m_tiles.erase(it);
     m_view.setPages(sizes);
     if (m_needsInitialZoom && width() > 0 && !sizes.isEmpty()) {
         m_needsInitialZoom = false;
@@ -177,7 +276,8 @@ void NoteView::syncPages() {
 }
 
 void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
-    QQuickPaintedItem::geometryChange(newGeometry, oldGeometry);
+    QQuickItem::geometryChange(newGeometry, oldGeometry);
+    m_overlay->setSize(newGeometry.size());
     const bool fitted = m_view.horizontallyLocked();
     m_view.setViewSize(newGeometry.size());
     // A page that fit before keeps fitting when a tile shrinks.
@@ -191,83 +291,28 @@ void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeomet
 
 void NoteView::viewMoved() {
     update();
+    // Ink waiting on tiles was drawn for the old view; it's a few ms from
+    // landing in the tiles, so just drop it rather than redraw it.
+    if (!m_stroke && !m_pending.isEmpty())
+        clearLive();
     if (!m_zooming)
-        scheduleRenders();
+        m_scheduleTimer.start();
     emit viewChanged();
+}
+
+void NoteView::itemChange(ItemChange change, const ItemChangeData &value) {
+    if (change == ItemSceneChange && value.window)
+        // Kinetic scrolling steps once per presented frame (vsync), not on a timer.
+        connect(value.window, &QQuickWindow::frameSwapped, this, &NoteView::flingFrame, Qt::QueuedConnection);
+    QQuickItem::itemChange(change, value);
 }
 
 double NoteView::deviceRatio() const { return window() ? window()->effectiveDevicePixelRatio() : 1.0; }
 
+double NoteView::targetScale() const { return std::round(m_view.zoom() * deviceRatio() * 1e4) / 1e4; }
+
 bool NoteView::needsBackground(const Page &page) const {
     return page.source >= 0 && !page.note && m_doc && !m_doc->sourcePdf().isEmpty();
-}
-
-double NoteView::backgroundScaleFor(const Page &page) const {
-    const double cap = std::sqrt(MaxPagePixels / std::max(1.0, page.size.width() * page.size.height()));
-    return std::min(m_view.zoom() * deviceRatio(), cap);
-}
-
-void NoteView::scheduleRenders() {
-    if (!m_doc)
-        return;
-    QList<PageRenderer::Job> jobs;
-    QList<int> order = m_view.visiblePages(0);
-    // One screen above and below, so scrolling finds pages ready.
-    for (int i : m_view.visiblePages(height()))
-        if (!order.contains(i))
-            order.append(i);
-    QSet<quint64> keep;
-    for (int i : order) {
-        const auto page = m_doc->page(i);
-        if (!page)
-            continue;
-        keep.insert(page->id);
-        if (!needsBackground(*page))
-            continue;
-        const double target = backgroundScaleFor(*page);
-        if (std::abs(m_cache[page->id].backgroundScale - target) > 1e-6)
-            jobs.append({page->id, page->source, target});
-    }
-    // Pages far away give their memory back.
-    for (auto it = m_cache.begin(); it != m_cache.end();)
-        it = keep.contains(it.key()) ? std::next(it) : m_cache.erase(it);
-    m_renderer.setJobs(jobs);
-}
-
-void NoteView::onRendered(quint64 key, double scale, const QImage &image, int generation) {
-    if (generation != m_renderer.generation() || !m_doc)
-        return;
-    for (const auto &p : m_doc->pages()) {
-        if (p->id == key) {
-            auto &c = m_cache[key];
-            c.background = image;
-            c.backgroundScale = scale;
-            update();
-            return;
-        }
-    }
-}
-
-void NoteView::onPageChanged(quint64) { update(); }
-
-void NoteView::buildComposite(const Page &page, Cache &cache, double scale) {
-    const QSize size(int(std::ceil(page.size.width() * scale)), int(std::ceil(page.size.height() * scale)));
-    QImage img(size, QImage::Format_ARGB32_Premultiplied);
-    img.fill(Qt::white);
-    QPainter p(&img);
-    if (!cache.background.isNull()) {
-        p.setRenderHint(QPainter::SmoothPixmapTransform);
-        p.drawImage(QRectF(QPointF(0, 0), QSizeF(size)), cache.background);
-    }
-    p.scale(scale, scale);
-    p.setClipRect(QRectF(QPointF(0, 0), page.size));
-    Ink::paint(p, page.strokes);
-    p.end();
-    img.setDevicePixelRatio(deviceRatio());
-    cache.composite = img;
-    cache.compositeScale = scale;
-    cache.compositeRevision = page.revision;
-    cache.compositeBackground = cache.backgroundScale;
 }
 
 QRectF NoteView::snapped(QRectF r) const {
@@ -276,89 +321,294 @@ QRectF NoteView::snapped(QRectF r) const {
             std::round(r.height() * d) / d};
 }
 
-// --- Painting ---------------------------------------------------------------
-
-void NoteView::paint(QPainter *p) {
-    p->fillRect(QRectF(0, 0, width(), height()), m_backdrop);
-    if (!m_doc)
-        return;
-    const QRectF clip = p->clipBoundingRect().isEmpty() ? QRectF(0, 0, width(), height()) : p->clipBoundingRect();
-    for (int i : m_view.visiblePages(8)) {
-        const QRectF rect = snapped(m_view.pageScreenRect(i));
-        if (rect.adjusted(-8, -8, 8, 8).intersects(clip))
-            paintPage(*p, i, rect);
-    }
-    if (m_hoverVisible) {
-        const double r = Ink::EraserRadius * m_view.zoom();
-        p->setRenderHint(QPainter::Antialiasing);
-        p->setBrush(Qt::NoBrush);
-        p->setPen(QPen(QColor(255, 255, 255, 200), 3));
-        p->drawEllipse(m_hover, r, r);
-        QPen dash(QColor(40, 40, 46), 1.25, Qt::DashLine);
-        dash.setDashPattern({3, 3});
-        p->setPen(dash);
-        p->drawEllipse(m_hover, r, r);
-    }
-}
-
-void NoteView::paintPage(QPainter &p, int index, const QRectF &rect) {
+// Grid cells of a page at a scale that fall within the view (plus margin).
+QRect NoteView::tileRange(int index, double scale, double margin) const {
     const auto page = m_doc->page(index);
-    if (!page)
+    const QRectF screen = m_view.pageScreenRect(index);
+    const QRectF visible = QRectF(0, 0, width(), height()).adjusted(-margin, -margin, margin, margin) & screen;
+    if (visible.isEmpty())
+        return {};
+    const double k = scale / m_view.zoom(); // Device pixels (at scale) per logical pixel.
+    const QPointF a = (visible.topLeft() - screen.topLeft()) * k, b = (visible.bottomRight() - screen.topLeft()) * k;
+    const QSize grid = TileRenderer::gridSize(page->size, scale);
+    const int T = TileRenderer::TileSize;
+    return QRect(QPoint(std::clamp(int(a.x()) / T, 0, grid.width() - 1), std::clamp(int(a.y()) / T, 0, grid.height() - 1)),
+                 QPoint(std::clamp(int(std::ceil(b.x())) / T, 0, grid.width() - 1),
+                        std::clamp(int(std::ceil(b.y())) / T, 0, grid.height() - 1)));
+}
+
+// --- Tiles ------------------------------------------------------------------
+
+void NoteView::scheduleRenders() {
+    if (!m_doc || m_zooming || width() <= 0)
         return;
+    const double scale = targetScale();
+    const double margin = height() * 0.5;
+    QList<TileRenderer::Job> urgent, later;
+    QSet<quint64> keep;
 
-    // Soft shadow and hairline border keep white sheets distinct on any theme.
-    p.setPen(Qt::NoPen);
-    for (int k = 1; k <= 4; ++k)
-        p.fillRect(rect.adjusted(-k, -k + 2, k, k + 2), QColor(0, 0, 0, 14 - k * 2));
-    p.fillRect(rect.adjusted(-1, -1, 1, 1), QColor(0, 0, 0, 40));
-    p.fillRect(rect, Qt::white);
+    for (int index : m_view.visiblePages(margin)) {
+        const auto page = m_doc->page(index);
+        keep.insert(page->id);
+        auto &pt = m_tiles[page->id];
+        pt.revision = page->revision;
+        const QRect wantedRange = tileRange(index, scale, margin);
+        const QRect visibleRange = tileRange(index, scale, 0);
+        const bool background = needsBackground(*page);
 
-    auto &cache = m_cache[page->id];
-    const double scale = m_view.zoom() * deviceRatio();
-    const double cap = std::sqrt(MaxPagePixels / std::max(1.0, page->size.width() * page->size.height()));
-    const bool needBg = needsBackground(*page);
-    bool drewInk = false;
-
-    if (scale <= cap) {
-        const bool valid = !cache.composite.isNull() && std::abs(cache.compositeScale - scale) < 1e-6 &&
-                           cache.compositeRevision == page->revision &&
-                           cache.compositeBackground == cache.backgroundScale;
-        if (!valid && !m_zooming && (!needBg || cache.backgroundScale > 0))
-            buildComposite(*page, cache, scale);
-        if (!cache.composite.isNull()) {
-            if (std::abs(cache.compositeScale - scale) < 1e-6) {
-                p.drawImage(rect.topLeft(), cache.composite);
-            } else {
-                p.drawImage(rect, cache.composite);
+        for (int ty = wantedRange.top(); ty <= wantedRange.bottom() && !wantedRange.isEmpty(); ++ty) {
+            for (int tx = wantedRange.left(); tx <= wantedRange.right(); ++tx) {
+                Tile *tile = nullptr;
+                for (auto &t : pt.tiles)
+                    if (t.scale == scale && t.tx == tx && t.ty == ty)
+                        tile = &t;
+                if (!tile) {
+                    pt.tiles.append(Tile{scale, tx, ty});
+                    tile = &pt.tiles.last();
+                }
+                if (tile->revision == page->revision)
+                    continue;
+                // White paper with no ink here needs no texture at all.
+                const QRectF area = TileRenderer::tilePoints(page->size, scale, tx, ty);
+                bool inked = false;
+                for (const auto &s : page->strokes)
+                    if (s->bounds().intersects(area)) { inked = true; break; }
+                if (!background && !inked) {
+                    tile->blank = true;
+                    tile->revision = page->revision;
+                    tile->image = QImage();
+                    ++tile->serial;
+                    continue;
+                }
+                tile->requested = page->revision;
+                TileRenderer::Job job{page->id, background ? page->source : -1, page->size, scale, tx, ty,
+                                      page->revision, page->strokes};
+                (visibleRange.contains(tx, ty) ? urgent : later).append(job);
             }
-            drewInk = cache.compositeRevision == page->revision;
-        } else if (!cache.background.isNull()) {
-            p.drawImage(rect, cache.background);
         }
-    } else if (!cache.background.isNull()) {
-        p.setRenderHint(QPainter::SmoothPixmapTransform, !m_zooming);
-        p.drawImage(rect, cache.background);
+
+        // Tiles at other scales stay as stand-ins until the current scale
+        // covers what's visible; tiles drift out of range get dropped.
+        bool covered = true;
+        for (const auto &t : pt.tiles)
+            if (t.scale == scale && visibleRange.contains(t.tx, t.ty) && t.revision < 0)
+                covered = false;
+        pt.tiles.removeIf([&](const Tile &t) {
+            if (t.scale == scale)
+                return !wantedRange.contains(t.tx, t.ty);
+            return covered;
+        });
     }
 
-    if (!drewInk) {
-        p.save();
-        p.setClipRect(rect, Qt::IntersectClip);
-        p.translate(rect.topLeft());
-        p.scale(rect.width() / page->size.width(), rect.height() / page->size.height());
-        Ink::paint(p, page->strokes);
-        p.restore();
-    }
-    if (m_stroke && m_strokePage == page && !m_live.isNull()) {
-        p.save();
-        p.setClipRect(rect, Qt::IntersectClip);
-        if (m_stroke->tool == Tool::Highlighter) {
-            p.setCompositionMode(QPainter::CompositionMode_Multiply);
-            p.setOpacity(Ink::HighlightAlpha);
+    // Pages out of reach give back their tiles and stroke outlines.
+    for (auto it = m_tiles.begin(); it != m_tiles.end();) {
+        if (keep.contains(it.key())) {
+            ++it;
+            continue;
         }
-        p.drawImage(QPointF(0, 0), m_live);
-        p.restore();
+        for (const auto &p : m_doc->pages())
+            if (p->id == it.key())
+                for (const auto &s : p->strokes)
+                    s->releasePath();
+        it = m_tiles.erase(it);
+    }
+    m_renderer.setJobs(urgent + later);
+    update();
+    maybeClearLive();
+}
+
+void NoteView::onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation) {
+    if (generation != m_renderer.generation())
+        return;
+    auto it = m_tiles.find(page);
+    if (it == m_tiles.end())
+        return;
+    for (auto &t : it->tiles) {
+        if (t.scale == scale && t.tx == tx && t.ty == ty) {
+            if (revision < t.revision)
+                return;
+            t.image = image;
+            t.revision = revision;
+            t.blank = false;
+            ++t.serial;
+            update();
+            maybeClearLive();
+            if (revision != it->revision || !m_zooming)
+                m_scheduleTimer.start(); // Retire stand-ins, or catch up.
+            return;
+        }
     }
 }
+
+void NoteView::onPageChanged(quint64 id, const QRectF &region) {
+    auto it = m_tiles.find(id);
+    const auto pageIt = std::find_if(m_doc->pages().begin(), m_doc->pages().end(),
+                                     [id](const PagePtr &p) { return p->id == id; });
+    if (it != m_tiles.end() && pageIt != m_doc->pages().end()) {
+        // Tiles the change didn't touch are still exactly right.
+        const int now = (*pageIt)->revision;
+        const QRectF touched = region.adjusted(-1, -1, 1, 1);
+        for (auto &t : it->tiles)
+            if (t.revision == it->revision &&
+                !TileRenderer::tilePoints((*pageIt)->size, t.scale, t.tx, t.ty).intersects(touched))
+                t.revision = now;
+        it->revision = now;
+    }
+    m_scheduleTimer.start();
+}
+
+void NoteView::resetTiles() {
+    m_tiles.clear();
+    scheduleRenders();
+}
+
+bool NoteView::tilesCurrent() const {
+    if (!m_doc)
+        return true;
+    const double scale = targetScale();
+    for (int index : m_view.visiblePages(0)) {
+        const auto page = m_doc->page(index);
+        const QRect range = tileRange(index, scale, 0);
+        const auto pt = m_tiles.value(page->id);
+        for (int ty = range.top(); ty <= range.bottom() && !range.isEmpty(); ++ty)
+            for (int tx = range.left(); tx <= range.right(); ++tx) {
+                bool ok = false;
+                for (const auto &t : pt.tiles)
+                    if (t.scale == scale && t.tx == tx && t.ty == ty && t.revision == page->revision)
+                        ok = true;
+                if (!ok)
+                    return false;
+            }
+    }
+    return true;
+}
+
+void NoteView::releaseResources() {
+    // The scene graph (and every texture) is going away; tiles must be
+    // rendered again for the next one.
+    m_nodes.clear();
+    m_pageNodes.clear();
+    m_backdropNode = nullptr;
+    QMetaObject::invokeMethod(this, &NoteView::resetTiles, Qt::QueuedConnection);
+}
+
+QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
+    // Containers are (identity) transform nodes, not plain QSGNodes: Qt's
+    // software renderer only tracks inherited transform and clip for those,
+    // and children added later under a plain node would lose the item's
+    // position.
+    QSGNode *root = old;
+    if (!root) {
+        root = new QSGTransformNode;
+        m_nodes.clear();
+        m_pageNodes.clear();
+        m_backdropNode = window()->createRectangleNode();
+        root->appendChildNode(m_backdropNode);
+    }
+    m_backdropNode->setRect(boundingRect());
+    m_backdropNode->setColor(m_backdrop);
+
+    QSet<NodeKey> used;
+    QSet<quint64> livePages;
+    bool lost = false;
+    if (m_doc) {
+        const double scale = targetScale();
+        const QRectF view = boundingRect();
+        for (int index = 0; index < m_doc->pageCount(); ++index) {
+            const auto page = m_doc->page(index);
+            const QRectF r = snapped(m_view.pageScreenRect(index));
+            auto pt = m_tiles.find(page->id);
+            const bool near = r.adjusted(-8, -8, 8, 8).intersects(view);
+            if (!near && pt == m_tiles.end())
+                continue;
+            livePages.insert(page->id);
+            PageNode &pn = m_pageNodes[page->id];
+            if (!pn.group) {
+                pn.group = new QSGTransformNode;
+                for (auto &rect : pn.rects) {
+                    rect = window()->createRectangleNode();
+                    pn.group->appendChildNode(rect);
+                }
+                pn.standIns = new QSGTransformNode;
+                pn.current = new QSGTransformNode;
+                pn.group->appendChildNode(pn.standIns);
+                pn.group->appendChildNode(pn.current);
+                root->appendChildNode(pn.group);
+            }
+            // Soft shadow and hairline border keep white sheets distinct on any theme.
+            for (int k = 4; k >= 1; --k) {
+                pn.rects[4 - k]->setRect(r.adjusted(-k, -k + 2, k, k + 2));
+                pn.rects[4 - k]->setColor(QColor(0, 0, 0, 14 - k * 2));
+            }
+            pn.rects[4]->setRect(r.adjusted(-1, -1, 1, 1));
+            pn.rects[4]->setColor(QColor(0, 0, 0, 40));
+            pn.rects[5]->setRect(r);
+            pn.rects[5]->setColor(Qt::white);
+            if (pt == m_tiles.end())
+                continue;
+
+            for (auto &t : pt->tiles) {
+                if (t.blank || t.revision < 0)
+                    continue;
+                const NodeKey key{page->id, qint64(std::llround(t.scale * 1e4)), t.tx, t.ty};
+                NodeEntry &entry = m_nodes[key];
+                if (!entry.node) {
+                    entry.node = window()->createImageNode();
+                    entry.node->setOwnsTexture(true);
+                    entry.node->setFiltering(QSGTexture::Linear);
+                }
+                if (entry.serial != t.serial) {
+                    if (t.image.isNull()) {
+                        lost = true; // Shouldn't happen; re-render to be safe.
+                    } else {
+                        // The node owns its texture and frees the previous one.
+                        entry.node->setTexture(window()->createTextureFromImage(t.image, QQuickWindow::TextureIsOpaque));
+                        entry.serial = t.serial;
+                        t.image = QImage(); // Uploaded: the GPU copy is the one that counts now.
+                    }
+                }
+                if (!entry.node->texture())
+                    continue;
+                QSGNode *parent = t.scale == scale ? pn.current : pn.standIns;
+                if (entry.node->parent() != parent) {
+                    if (entry.node->parent())
+                        entry.node->parent()->removeChildNode(entry.node);
+                    parent->appendChildNode(entry.node);
+                }
+                const QRect px = TileRenderer::tilePixels(page->size, t.scale, t.tx, t.ty);
+                const double f = m_view.zoom() / t.scale;
+                entry.node->setRect(QRectF(r.x() + px.x() * f, r.y() + px.y() * f, px.width() * f, px.height() * f));
+                entry.node->setSourceRect(QRectF(QPointF(0, 0), entry.node->texture()->textureSize()));
+                used.insert(key);
+            }
+        }
+    }
+    if (lost)
+        QMetaObject::invokeMethod(this, &NoteView::resetTiles, Qt::QueuedConnection);
+
+    for (auto it = m_nodes.begin(); it != m_nodes.end();) {
+        if (used.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        if (it->node->parent())
+            it->node->parent()->removeChildNode(it->node);
+        delete it->node;
+        it = m_nodes.erase(it);
+    }
+    for (auto it = m_pageNodes.begin(); it != m_pageNodes.end();) {
+        if (livePages.contains(it.key())) {
+            ++it;
+            continue;
+        }
+        root->removeChildNode(it->group);
+        delete it->group; // Rects and the empty tile groups go with it.
+        it = m_pageNodes.erase(it);
+    }
+    return root;
+}
+
+// --- Live layer -------------------------------------------------------------
 
 QRectF NoteView::strokeScreenRect(int from) const {
     if (!m_stroke || !m_doc || m_stroke->samples.isEmpty())
@@ -382,22 +632,9 @@ void NoteView::drawLive(int from) {
     if (index < 0)
         return;
     const QRectF page = snapped(m_view.pageScreenRect(index));
-    const double d = deviceRatio();
-    const QSize size(int(std::ceil(width() * d)), int(std::ceil(height() * d)));
-    if (m_live.size() != size || m_live.devicePixelRatio() != d) {
-        m_live = QImage(size, QImage::Format_ARGB32_Premultiplied);
-        m_live.setDevicePixelRatio(d);
-        m_live.fill(Qt::transparent);
-        m_liveDirty = {};
-        m_liveZoom = 0;
-    }
-    QPainter lp(&m_live);
-    // The view moved under the stroke (or it just began): start the layer over.
     if (m_liveZoom != m_view.zoom() || m_liveOrigin != page.topLeft()) {
-        lp.setCompositionMode(QPainter::CompositionMode_Source);
-        lp.fillRect(m_liveDirty, Qt::transparent);
-        lp.setCompositionMode(QPainter::CompositionMode_SourceOver);
-        m_liveDirty = {};
+        // The view moved under the layer: anything on it is stale.
+        clearLive();
         m_liveZoom = m_view.zoom();
         m_liveOrigin = page.topLeft();
         from = 0;
@@ -410,25 +647,66 @@ void NoteView::drawLive(int from) {
     tail.samples = m_stroke->samples.mid(std::max(0, from));
     QColor c = m_stroke->color;
     c.setAlpha(255);
+    QImage &img = m_overlay->layer(m_stroke->tool, deviceRatio());
+    QPainter lp(&img);
     lp.setRenderHint(QPainter::Antialiasing);
     lp.setClipRect(page);
     lp.translate(page.topLeft());
     lp.scale(m_view.zoom(), m_view.zoom());
     lp.setPen(Qt::NoPen);
     lp.setBrush(c);
-    lp.drawPath(tail.path());
-    m_liveDirty |= QRectF(page.topLeft() + tail.bounds().topLeft() * m_view.zoom(),
-                          tail.bounds().size() * m_view.zoom()).adjusted(-2, -2, 2, 2);
+    lp.drawPath(*tail.path());
+    const QRectF b = tail.bounds();
+    const QRectF screen = QRectF(page.topLeft() + b.topLeft() * m_view.zoom(), b.size() * m_view.zoom())
+                              .adjusted(-2, -2, 2, 2) & boundingRect();
+    m_overlay->dirty |= screen;
+    m_overlay->refresh(screen.toAlignedRect());
+}
+
+void NoteView::clearLive() {
+    m_pending.clear();
+    m_liveZoom = 0;
+    if (m_overlay && !m_overlay->dirty.isEmpty())
+        m_overlay->clear();
+}
+
+// Committed ink leaves the layer once the tiles showing it have arrived.
+void NoteView::maybeClearLive() {
+    if (m_stroke || m_pending.isEmpty() || !m_doc)
+        return;
+    const double scale = targetScale();
+    for (auto it = m_pending.begin(); it != m_pending.end(); ++it) {
+        const int index = [&] {
+            for (int i = 0; i < m_doc->pageCount(); ++i)
+                if (m_doc->page(i)->id == it.key()) return i;
+            return -1;
+        }();
+        if (index < 0)
+            continue;
+        const QRect range = tileRange(index, scale, 0);
+        const auto pt = m_tiles.value(it.key());
+        for (int ty = range.top(); ty <= range.bottom() && !range.isEmpty(); ++ty)
+            for (int tx = range.left(); tx <= range.right(); ++tx) {
+                bool ok = false;
+                for (const auto &t : pt.tiles)
+                    if (t.scale == scale && t.tx == tx && t.ty == ty && t.revision >= it.value())
+                        ok = true;
+                if (!ok)
+                    return;
+            }
+    }
+    clearLive();
 }
 
 void NoteView::setHover(QPointF pos, bool visible) {
-    const double r = Ink::EraserRadius * m_view.zoom() + 4;
-    if (m_hoverVisible)
-        update(QRectF(m_hover - QPointF(r, r), QSizeF(2 * r, 2 * r)).toAlignedRect());
-    m_hover = pos;
-    m_hoverVisible = visible;
-    if (visible)
-        update(QRectF(pos - QPointF(r, r), QSizeF(2 * r, 2 * r)).toAlignedRect());
+    const double r = Ink::EraserRadius * m_view.zoom();
+    const double pad = r + 4;
+    if (m_overlay->hoverVisible)
+        m_overlay->refresh(QRectF(m_overlay->hover - QPointF(pad, pad), QSizeF(2 * pad, 2 * pad)).toAlignedRect());
+    m_overlay->hover = pos;
+    m_overlay->hoverVisible = visible;
+    m_overlay->hoverRadius = r;
+    m_overlay->refresh(QRectF(pos - QPointF(pad, pad), QSizeF(2 * pad, 2 * pad)).toAlignedRect());
 }
 
 // --- Ink --------------------------------------------------------------------
@@ -436,7 +714,7 @@ void NoteView::setHover(QPointF pos, bool visible) {
 void NoteView::beginStroke(QPointF pos, double pressure, bool erase, Source source) {
     if (!m_doc)
         return;
-    m_fling.stop();
+    stopFling();
     emit interacted();
     QPointF local;
     const int index = m_view.pageAt(pos, &local);
@@ -462,9 +740,7 @@ void NoteView::beginStroke(QPointF pos, double pressure, bool erase, Source sour
     m_stroke->width = float(activeWidth(m_tool));
     m_smoothedPressure = pressure;
     m_stroke->samples.append({float(local.x()), float(local.y()), float(pressure)});
-    m_liveZoom = 0; // Clears the previous stroke's layer.
     drawLive(0);
-    update(strokeScreenRect(0).toAlignedRect());
 }
 
 void NoteView::extendStroke(QPointF pos, double pressure) {
@@ -485,11 +761,8 @@ void NoteView::extendStroke(QPointF pos, double pressure) {
     if (length(local - QPointF(last.x, last.y)) < 0.25 / m_view.zoom())
         return;
     m_stroke->samples.append({float(local.x()), float(local.y()), float(m_smoothedPressure)});
-    m_stroke->invalidate();
     drawLive(m_stroke->samples.size() - 4);
     m_last = pos;
-    // The spline reshapes the previous couple of segments too.
-    update(strokeScreenRect(m_stroke->samples.size() - 4).toAlignedRect());
 }
 
 void NoteView::endStroke() {
@@ -500,24 +773,9 @@ void NoteView::endStroke() {
         m_strokePage.reset();
         stroke->samples = Ink::simplify(stroke->samples, stroke->tool, stroke->width);
         stroke->invalidate();
-        const int before = page->revision;
         m_doc->addStroke(page, stroke);
-        // A pen stroke lands on top of everything, and the live layer already
-        // holds it at this exact scale: copy those pixels into the page cache
-        // instead of filling the whole outline again.
-        auto it = m_cache.find(page->id);
-        const int index = m_doc->indexOf(page);
-        const double scale = m_view.zoom() * deviceRatio();
-        if (it != m_cache.end() && stroke->tool == Tool::Pen && it->compositeRevision == before &&
-            !it->composite.isNull() && std::abs(it->compositeScale - scale) < 1e-6 && index >= 0 &&
-            m_liveZoom == m_view.zoom() && m_liveOrigin == snapped(m_view.pageScreenRect(index)).topLeft()) {
-            const double d = deviceRatio();
-            const QRectF source(m_liveOrigin * d, QSizeF(it->composite.size()));
-            QPainter cp(&it->composite);
-            cp.drawImage(QRectF(QPointF(0, 0), QSizeF(it->composite.size()) / d), m_live, source);
-            it->compositeRevision = page->revision;
-        }
-        update();
+        // The layer keeps showing it until the tiles catch up.
+        m_pending[page->id] = page->revision;
     } else if (m_gesture == Gesture::Erase && m_doc) {
         m_doc->endErase();
     }
@@ -545,7 +803,7 @@ void NoteView::eraseAlong(QPointF from, QPointF to) {
 // --- Pan --------------------------------------------------------------------
 
 void NoteView::beginPan(QPointF pos, Gesture kind, Source source) {
-    m_fling.stop();
+    stopFling();
     m_gesture = kind;
     m_source = source;
     m_last = pos;
@@ -567,7 +825,9 @@ void NoteView::panTo(QPointF pos) {
 void NoteView::endPan() {
     if (m_source == Source::Touch && m_panClock.elapsed() < 60 && length(m_panVelocity) > 0.3) {
         m_flingVelocity = m_panVelocity;
-        m_fling.start();
+        m_flinging = true;
+        m_flingClock.restart();
+        update(); // Frames drive the fling from here.
     }
     m_gesture = Gesture::None;
     m_source = Source::None;
@@ -595,7 +855,7 @@ bool NoteView::hitsMe(QPointF scenePos) const {
             break;
         item = child;
     }
-    return item == this;
+    return item == this || item == m_overlay;
 }
 
 bool NoteView::eventFilter(QObject *watched, QEvent *event) {
@@ -609,8 +869,8 @@ bool NoteView::eventFilter(QObject *watched, QEvent *event) {
         auto *e = static_cast<QTabletEvent *>(event);
         const bool mine = m_source == Source::Stylus || hitsMe(e->scenePosition());
         if (!mine) {
-            if (m_hoverVisible && !m_stylusDown)
-                setHover(m_hover, false);
+            if (m_overlay->hoverVisible && !m_stylusDown)
+                setHover(m_overlay->hover, false);
             return false;
         }
         tabletEvent(e, mapFromScene(e->scenePosition()));
@@ -622,10 +882,10 @@ bool NoteView::eventFilter(QObject *watched, QEvent *event) {
     } else if (event->type() == QEvent::TabletLeaveProximity) {
         m_stylusNear = false;
         m_stylusClock.restart();
-        setHover(m_hover, false);
+        setHover(m_overlay->hover, false);
         setEraseEngaged(false);
     }
-    return QQuickPaintedItem::eventFilter(watched, event);
+    return QQuickItem::eventFilter(watched, event);
 }
 
 bool NoteView::event(QEvent *event) {
@@ -647,7 +907,7 @@ bool NoteView::event(QEvent *event) {
     default:
         break;
     }
-    return QQuickPaintedItem::event(event);
+    return QQuickItem::event(event);
 }
 
 void NoteView::tabletEvent(QTabletEvent *e, QPointF pos) {
@@ -667,7 +927,7 @@ void NoteView::tabletEvent(QTabletEvent *e, QPointF pos) {
             m_gesture = Gesture::None; // The pen wins over a resting palm.
             m_source = Source::None;
         }
-        m_fling.stop();
+        stopFling();
         m_stylusDown = true;
         setEraseEngaged(erase);
         beginStroke(pos, pressure, erase, Source::Stylus);
@@ -747,11 +1007,11 @@ void NoteView::hoverMoveEvent(QHoverEvent *e) {
         setHover(e->position(), m_tool == Tool::Eraser);
 }
 
-void NoteView::hoverLeaveEvent(QHoverEvent *) { setHover(m_hover, false); }
+void NoteView::hoverLeaveEvent(QHoverEvent *) { setHover(m_overlay->hover, false); }
 
 void NoteView::wheelEvent(QWheelEvent *e) {
     e->accept();
-    m_fling.stop();
+    stopFling();
     emit interacted();
     if (e->modifiers() & Qt::ControlModifier) {
         const double steps = e->angleDelta().y() / 120.0;
@@ -797,7 +1057,7 @@ void NoteView::touchEvent(QTouchEvent *e) {
         const QPointF c = (active[0] + active[1]) / 2;
         const double d = std::max(1.0, length(active[0] - active[1]));
         if (m_gesture != Gesture::Pinch) {
-            m_fling.stop();
+            stopFling();
             emit interacted();
             m_gesture = Gesture::Pinch;
             m_source = Source::Touch;
@@ -827,4 +1087,17 @@ void NoteView::touchUngrabEvent() {
         m_source = Source::None;
     }
     m_touchIgnored = false;
+}
+
+void NoteView::flingFrame() {
+    if (!m_flinging)
+        return;
+    const double dt = std::clamp<double>(m_flingClock.restart(), 1, 50);
+    const double y = m_view.scrollY(), x = m_view.panX();
+    m_view.panBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
+    // Same decay per millisecond whatever the refresh rate.
+    m_flingVelocity *= std::pow(0.94, dt / 16.0);
+    if (length(m_flingVelocity) < 0.02 || (y == m_view.scrollY() && x == m_view.panX()))
+        m_flinging = false;
+    viewMoved();
 }

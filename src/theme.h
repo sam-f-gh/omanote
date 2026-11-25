@@ -2,6 +2,7 @@
 
 #include <QFileSystemWatcher>
 #include <QHash>
+#include <QLocalSocket>
 #include <QObject>
 #include <QProcess>
 #include <QTimer>
@@ -44,6 +45,7 @@ private:
     QString color(const QString &key) const;
     void reload();
     void refreshRounding();
+    void connectEvents();
 
     QString m_directory;
     QHash<QString, QString> m_colors;
@@ -53,4 +55,6 @@ private:
     int m_radius = 0;
     QProcess m_roundingProcess;
     QTimer m_roundingPoll, m_roundingTimeout;
+    QLocalSocket m_events;
+    QTimer m_reconnect;
 };

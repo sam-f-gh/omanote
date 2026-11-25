@@ -8,13 +8,35 @@
 
 float Stroke::radius(int i) const { return Ink::radiusFor(tool, width, samples[i].p); }
 
-const QPainterPath &Stroke::path() const {
-    if (!m_path)
-        m_path = std::make_shared<QPainterPath>(Ink::outline(*this));
-    return *m_path;
+std::shared_ptr<const QPainterPath> Stroke::path() const {
+    auto cached = std::atomic_load(&m_path);
+    if (!cached) {
+        cached = std::make_shared<const QPainterPath>(Ink::outline(*this));
+        std::atomic_store(&m_path, cached);
+    }
+    return cached;
 }
 
-QRectF Stroke::bounds() const { return path().boundingRect(); }
+void Stroke::releasePath() const { std::atomic_store(&m_path, std::shared_ptr<const QPainterPath>()); }
+
+void Stroke::invalidate() {
+    releasePath();
+    m_finalized = false;
+}
+
+static QRectF splineBounds(const Stroke &stroke);
+
+QRectF Stroke::bounds() const {
+    if (m_finalized)
+        return m_bounds;
+    return splineBounds(*this);
+}
+
+void Stroke::finalize() {
+    m_finalized = false;
+    m_bounds = bounds();
+    m_finalized = true;
+}
 
 namespace Ink {
 
@@ -45,19 +67,24 @@ double dist3(const Sample &s, const Sample &a, const Sample &b, float ra, float 
     return std::sqrt(px * px + py * py + pr * pr);
 }
 
-void rdp(const QVector<Sample> &s, const QVector<float> &r, int a, int b, double tol, QVector<bool> &keep) {
-    if (b <= a + 1)
-        return;
-    double best = -1;
-    int index = -1;
-    for (int i = a + 1; i < b; ++i) {
-        const double d = dist3(s[i], s[a], s[b], r[a], r[b], r[i]);
-        if (d > best) { best = d; index = i; }
-    }
-    if (best > tol) {
-        keep[index] = true;
-        rdp(s, r, a, index, tol, keep);
-        rdp(s, r, index, b, tol, keep);
+// Iterative, so a 10 000-sample stroke can't blow the stack.
+void rdp(const QVector<Sample> &s, const QVector<float> &r, double tol, QVector<bool> &keep) {
+    QVector<std::pair<int, int>> stack{{0, int(s.size()) - 1}};
+    while (!stack.isEmpty()) {
+        const auto [a, b] = stack.takeLast();
+        if (b <= a + 1)
+            continue;
+        double best = -1;
+        int index = -1;
+        for (int i = a + 1; i < b; ++i) {
+            const double d = dist3(s[i], s[a], s[b], r[a], r[b], r[i]);
+            if (d > best) { best = d; index = i; }
+        }
+        if (best > tol) {
+            keep[index] = true;
+            stack.append({a, index});
+            stack.append({index, b});
+        }
     }
 }
 
@@ -159,6 +186,20 @@ QVector<Node> densify(const Stroke &stroke) {
     return nodes;
 }
 }
+}
+
+// Exactly what the outline covers: the spline overshoots its samples on
+// sharp turns, so bounds come from the same nodes, never the raw samples.
+static QRectF splineBounds(const Stroke &stroke) {
+    QRectF r;
+    for (const auto &n : Ink::densify(stroke)) {
+        const QRectF c(n.pt.x() - n.r, n.pt.y() - n.r, 2 * n.r, 2 * n.r);
+        r = r.isNull() ? c : r.united(c);
+    }
+    return r.adjusted(-0.5, -0.5, 0.5, 0.5);
+}
+
+namespace Ink {
 
 QVector<Sample> simplify(const QVector<Sample> &samples, Tool tool, float width, double tolerance) {
     if (samples.size() <= 2)
@@ -168,7 +209,7 @@ QVector<Sample> simplify(const QVector<Sample> &samples, Tool tool, float width,
         r[i] = radiusFor(tool, width, samples[i].p);
     QVector<bool> keep(samples.size(), false);
     keep.first() = keep.last() = true;
-    rdp(samples, r, 0, samples.size() - 1, tolerance, keep);
+    rdp(samples, r, tolerance, keep);
     QVector<Sample> out;
     for (int i = 0; i < samples.size(); ++i)
         if (keep[i])
@@ -232,7 +273,7 @@ void paintOne(QPainter &painter, const Stroke &stroke) {
         painter.setCompositionMode(QPainter::CompositionMode_Multiply);
     }
     painter.setBrush(c);
-    painter.drawPath(stroke.path());
+    painter.drawPath(*stroke.path());
     painter.restore();
 }
 
@@ -280,18 +321,58 @@ bool hits(const Stroke &stroke, QPointF a, QPointF b, double r) {
     return false;
 }
 
-QJsonObject toJson(const Stroke &stroke) {
-    QJsonArray points;
-    for (const auto &s : stroke.samples) {
-        points.append(std::round(s.x * 100) / 100);
-        points.append(std::round(s.y * 100) / 100);
-        points.append(std::round(s.p * 1000) / 1000);
+QString encodeSamples(const QVector<Sample> &samples) {
+    QByteArray out;
+    out.reserve(samples.size() * 5);
+    auto put = [&out](qint64 v) {
+        quint64 z = quint64((v << 1) ^ (v >> 63)); // zigzag
+        do {
+            const quint8 byte = z & 0x7f;
+            z >>= 7;
+            out.append(char(byte | (z ? 0x80 : 0)));
+        } while (z);
+    };
+    qint64 px = 0, py = 0, pp = 0;
+    for (const auto &s : samples) {
+        const qint64 x = std::llround(s.x * 100.0), y = std::llround(s.y * 100.0), p = std::llround(s.p * 1000.0);
+        put(x - px); put(y - py); put(p - pp);
+        px = x; py = y; pp = p;
     }
+    return QString::fromLatin1(out.toBase64());
+}
+
+QVector<Sample> decodeSamples(const QString &data) {
+    const QByteArray in = QByteArray::fromBase64(data.toLatin1());
+    QVector<Sample> out;
+    int i = 0;
+    auto get = [&](bool &ok) -> qint64 {
+        quint64 z = 0;
+        for (int shift = 0; i < in.size() && shift < 64; shift += 7) {
+            const quint8 byte = quint8(in[i++]);
+            z |= quint64(byte & 0x7f) << shift;
+            if (!(byte & 0x80))
+                return qint64(z >> 1) ^ -qint64(z & 1);
+        }
+        ok = false;
+        return 0;
+    };
+    qint64 x = 0, y = 0, p = 0;
+    while (i < in.size()) {
+        bool ok = true;
+        x += get(ok); y += get(ok); p += get(ok);
+        if (!ok)
+            break;
+        out.append({float(x / 100.0), float(y / 100.0), float(p / 1000.0)});
+    }
+    return out;
+}
+
+QJsonObject toJson(const Stroke &stroke) {
     return {{"id", QString::number(stroke.id)},
             {"tool", stroke.tool == Tool::Highlighter ? "highlighter" : "pen"},
             {"color", stroke.color.name()},
             {"width", stroke.width},
-            {"points", points}};
+            {"data", encodeSamples(stroke.samples)}};
 }
 
 StrokePtr fromJson(const QJsonObject &o) {
@@ -302,11 +383,17 @@ StrokePtr fromJson(const QJsonObject &o) {
     if (!s->color.isValid())
         s->color = QColor(0x18, 0x18, 0x1c);
     s->width = std::clamp(float(o.value("width").toDouble(2.5)), 0.1f, 100.f);
-    const QJsonArray pts = o.value("points").toArray();
-    for (int i = 0; i + 2 < pts.size(); i += 3)
-        s->samples.append({float(pts[i].toDouble()), float(pts[i + 1].toDouble()), float(pts[i + 2].toDouble())});
+    if (o.contains("data")) {
+        s->samples = decodeSamples(o.value("data").toString());
+    } else {
+        // Format 1: a flat [x, y, p, ...] array.
+        const QJsonArray pts = o.value("points").toArray();
+        for (int i = 0; i + 2 < pts.size(); i += 3)
+            s->samples.append({float(pts[i].toDouble()), float(pts[i + 1].toDouble()), float(pts[i + 2].toDouble())});
+    }
     if (s->samples.isEmpty())
         return nullptr;
+    s->finalize();
     return s;
 }
 

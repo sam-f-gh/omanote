@@ -8,6 +8,7 @@
 #include <vector>
 
 #include "ink.h"
+#include "pdfstore.h"
 
 // One sheet. Pages are shared pointers with stable ids, so undo history and
 // caches survive pages being inserted or trimmed around them.
@@ -26,6 +27,16 @@ using PagePtr = std::shared_ptr<Page>;
 
 class Command;
 
+// Everything a save needs, captured on the GUI thread so the PDF can be
+// built on a worker while the user keeps writing.
+struct SaveJob {
+    QByteArray source;
+    QList<PdfStore::PageData> pages;       // Copied on the GUI thread.
+    QString origin;
+    QList<PagePtr> leadingBlanks;          // Dropped from memory once saved.
+    int historyIndex = 0;
+    int generation = 0;
+};
 class Document : public QObject {
     Q_OBJECT
     Q_PROPERTY(int pageCount READ pageCount NOTIFY pagesChanged)
@@ -35,6 +46,7 @@ class Document : public QObject {
 
 public:
     static constexpr double A4Width = 595.28, A4Height = 842;
+    static constexpr int MaxHistory = 500;
 
     explicit Document(QObject *parent = nullptr);
     ~Document() override;
@@ -43,10 +55,15 @@ public:
     static Document *createNote(QObject *parent = nullptr);
     // nullptr and an error message when the file can't be read.
     static Document *open(const QString &path, QString *error, QObject *parent = nullptr);
+    static Document *fromLoaded(const QString &path, const PdfStore::Loaded &loaded, QObject *parent = nullptr);
 
     // Writes first..last content page atomically, then drops leading blank
-    // pages from memory so the view matches the file.
+    // pages from memory so the view matches the file. Synchronous; the app
+    // uses prepareSave() + PdfStore on a worker + finishSave().
     bool save(const QString &path, QString *error);
+    SaveJob prepareSave() const;
+    static bool writeJob(const SaveJob &job, const QString &path, QString *error);
+    void finishSave(const SaveJob &job, const QString &path);
 
     const QList<PagePtr> &pages() const { return m_pages; }
     int pageCount() const { return m_pages.size(); }
@@ -82,11 +99,12 @@ public:
     // Used by commands.
     void insertPageRaw(int index, const PagePtr &page);
     void removePageRaw(const PagePtr &page);
-    void touch(const PagePtr &page);
+    void touch(const PagePtr &page, const QRectF &region);
 
 signals:
     void pagesChanged();
-    void pageChanged(quint64 pageId);
+    // Ink changed on a page, within region (page points).
+    void pageChanged(quint64 pageId, const QRectF &region);
     void historyChanged();
 
 private:
@@ -102,4 +120,5 @@ private:
     int m_index = 0;
     int m_savedIndex = 0;
     std::unique_ptr<Command> m_pendingErase;
+    int m_generation = 0; // Bumped when history is rebased (trim).
 };
