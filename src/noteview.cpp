@@ -20,7 +20,7 @@
 namespace {
 constexpr int PalmGraceMs = 200;
 constexpr int HoverTrustMs = 1500;
-constexpr int LayerIdleMs = 15000;
+const int LayerIdleMs = qEnvironmentVariableIntValue("OMANOTE_LAYER_IDLE_MS") > 0 ? qEnvironmentVariableIntValue("OMANOTE_LAYER_IDLE_MS") : 15000;
 constexpr int UploadsPerFrame = 4; // 512² tiles: ~4 MB a frame keeps frames smooth.
 
 // A soft shadow as one ring of vertex-colored triangles from the sheet's edge
@@ -73,17 +73,37 @@ public:
         setFillColor(Qt::transparent);
         m_idle.setSingleShot(true);
         m_idle.setInterval(LayerIdleMs);
-        // Two view-sized images are a lot to hold for nothing; let go of
-        // them once the pen has rested a while.
+        // View-sized images are a lot to hold for nothing; once the pen has
+        // rested a while, let go of the layers and, while hidden, of the
+        // item's own backing image and texture (a zero-size painted item has
+        // no node). Within the idle window, showing it again stays free.
         QObject::connect(&m_idle, &QTimer::timeout, this, [this] {
-            if (dirty.isEmpty()) {
-                pen = QImage();
-                highlight = QImage();
+            if (!dirty.isEmpty())
+                return;
+            pen = QImage();
+            highlight = QImage();
+            if (!isVisible() && !m_parked) {
+                m_parked = true;
+                setSize(QSizeF(0, 0));
             }
         });
     }
 
+    void setFullSize(QSizeF size) {
+        m_fullSize = size;
+        if (!m_parked)
+            setSize(size);
+    }
+
+    void unpark() {
+        if (m_parked) {
+            m_parked = false;
+            setSize(m_fullSize);
+        }
+    }
+
     QImage &layer(Tool tool, double dpr) {
+        unpark();
         QImage &img = tool == Tool::Highlighter ? highlight : pen;
         const QSize size(int(std::ceil(width() * dpr)), int(std::ceil(height() * dpr)));
         if (img.size() != size || img.devicePixelRatio() != dpr) {
@@ -112,6 +132,8 @@ public:
     // An empty overlay is hidden, so the scene graph skips it entirely.
     void refresh(const QRect &rect) {
         const bool show = !dirty.isEmpty() || hoverVisible;
+        if (show)
+            unpark();
         if (show != isVisible()) {
             setVisible(show);
             // Coming back: repaint all of it, or pixels from before it was
@@ -155,8 +177,12 @@ public:
     bool hoverVisible = false;
     double hoverRadius = 0;
 
+    bool parked() const { return m_parked; }
+
 private:
     QTimer m_idle;
+    QSizeF m_fullSize;
+    bool m_parked = false;
 };
 
 NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
@@ -181,6 +207,10 @@ NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
     connect(&m_scheduleTimer, &QTimer::timeout, this, &NoteView::scheduleRenders);
 
     connect(&m_renderer, &TileRenderer::rendered, this, &NoteView::onRendered);
+    m_renderIdle.setSingleShot(true);
+    m_renderIdle.setInterval(qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") > 0
+                                 ? qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") : 30000);
+    connect(&m_renderIdle, &QTimer::timeout, &m_renderer, &TileRenderer::releaseIdle);
     // Proximity events go to the application, not to items.
     qApp->installEventFilter(this);
 }
@@ -313,7 +343,7 @@ void NoteView::syncPages() {
 
 void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeometry) {
     QQuickItem::geometryChange(newGeometry, oldGeometry);
-    m_overlay->setSize(newGeometry.size());
+    m_overlay->setFullSize(newGeometry.size());
     const bool fitted = m_view.horizontallyLocked();
     m_view.setViewSize(newGeometry.size());
     // A page that fit before keeps fitting when a tile shrinks.
@@ -498,6 +528,7 @@ void NoteView::scheduleRenders() {
 void NoteView::onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation) {
     if (generation != m_renderer.generation())
         return;
+    m_renderIdle.start();
     auto it = m_tiles.find(page);
     if (it == m_tiles.end())
         return;

@@ -157,6 +157,7 @@ private:
     bool m_fitMode = false;  // Keep fit-width as the window is resized.
     QTimer m_zoomSettle;
     QTimer m_scheduleTimer;  // Coalesces render scheduling to once per event batch.
+    QTimer m_renderIdle;     // No renders for a while: the renderer lets go of caches.
 
     // Scene-graph nodes, touched only in updatePaintNode (GUI blocked).
     struct NodeKey {

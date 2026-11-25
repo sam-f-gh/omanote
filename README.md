@@ -78,7 +78,15 @@ async open/save, QML for the chrome.
   are pure transforms. Ink edits re-render only the tiles they touch, off
   the GUI thread; CPU copies are dropped after upload.
 - The stroke being drawn costs the same per sample however long it gets.
-- Opening never rewrites the PDF (old ink is hidden via its layer); open and
-  save run on workers. Stroke data is varint-coded (format 2; format 1 loads).
-- No polling: theme via file watches, rounding via Hyprland's event socket,
-  fling stepped per presented frame.
+- PDFs are read straight from disk, never held in RAM: an open handle pins
+  the file (safe across save-in-place), qpdf and poppler read on demand, and
+  saves stream into a temp file that's renamed into place. Opening never
+  rewrites the PDF (old ink is hidden via its layer); open and save run on
+  workers. Stroke data is varint-coded (format 2; format 1 loads).
+- Scrolling moves one transform node; nodes are re-laid out only on zoom or
+  resize, tile uploads are spread over frames, page shadows are one ring.
+- Idle means idle: no polling (theme via file watches, rounding via
+  Hyprland's event socket, fling per presented frame), and after a rest the
+  live-ink layer, PDF tile cache and parsed PDFs are released.
+- The GTK platform theme Omarchy sets isn't loaded (~28 ms, ~17 MB); the UI
+  font comes from the settings portal instead.

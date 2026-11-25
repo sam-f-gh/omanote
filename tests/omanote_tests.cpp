@@ -445,6 +445,26 @@ private slots:
         }
     }
 
+    void rendererReleasesCachesWhenIdle() {
+        QTemporaryDir dir;
+        QString error;
+        const SourcePtr source = PdfSource::open(externalPdf(dir.path()), error);
+        QVERIFY(source);
+        TileRenderer renderer(2);
+        renderer.setPdf(source);
+        QSignalSpy spy(&renderer, &TileRenderer::rendered);
+        const TileRenderer::Job job{1, 0, {595.28, 842}, 1.0, 0, 0, 1, {}};
+        renderer.setJobs({job});
+        QTRY_COMPARE(spy.size(), 1);
+        QVERIFY(renderer.cachedBytes() > 0);
+        renderer.releaseIdle();
+        QCOMPARE(renderer.cachedBytes(), 0);
+        // Cold again: the worker reopens the PDF and renders the same pixels.
+        renderer.setJobs({TileRenderer::Job{1, 0, {595.28, 842}, 1.0, 0, 0, 2, {}}});
+        QTRY_COMPARE(spy.size(), 2);
+        QCOMPARE(spy[1].at(5).value<QImage>(), spy[0].at(5).value<QImage>());
+    }
+
     // --- Viewport ----------------------------------------------------------
     void viewportLocksAndRecenters() {
         Viewport v;

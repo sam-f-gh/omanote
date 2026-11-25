@@ -45,6 +45,10 @@ public:
     // longer wanted are aborted.
     void setJobs(const QList<Job> &jobs);
     int generation() const { return m_generation; }
+    // Idle: drop cached PDF tiles and each worker's parsed PDF. Whatever is
+    // on screen is already on the GPU; both come back on demand.
+    void releaseIdle();
+    qint64 cachedBytes();
 
     // Tile geometry: grid cell (tx, ty) at a scale, in device pixels of the
     // page image and in page points.

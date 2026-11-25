@@ -23,6 +23,7 @@ struct TileRenderer::Worker {
     std::unique_ptr<Poppler::Document> doc;
     int docGeneration = -1;
     bool busy = false;
+    bool drop = false; // Asked to let go of its parsed PDF while idle.
     Job current;
 };
 
@@ -108,6 +109,22 @@ void TileRenderer::setJobs(const QList<Job> &jobs) {
     m_wake.wakeAll();
 }
 
+void TileRenderer::releaseIdle() {
+    QMutexLocker lock(&m_mutex);
+    for (auto &w : m_workers)
+        w->drop = true;
+    m_wake.wakeAll();
+    QMutexLocker bg(&m_bgMutex);
+    m_bg.clear();
+    m_bgOrder.clear();
+    m_bgBytes = 0;
+}
+
+qint64 TileRenderer::cachedBytes() {
+    QMutexLocker lock(&m_bgMutex);
+    return m_bgBytes;
+}
+
 bool TileRenderer::wanted(const Job &job) {
     QMutexLocker lock(&m_mutex);
     if (m_quit)
@@ -148,10 +165,17 @@ void TileRenderer::run(Worker *worker) {
         int generation;
         {
             QMutexLocker lock(&m_mutex);
-            while (!m_quit && m_jobs.isEmpty())
+            while (!m_quit && m_jobs.isEmpty() && !worker->drop)
                 m_wake.wait(&m_mutex);
             if (m_quit)
                 return;
+            if (worker->drop) {
+                worker->drop = false;
+                lock.unlock();
+                worker->doc.reset();
+                worker->docGeneration = -1; // Reopened on the next job.
+                continue;
+            }
             job = m_jobs.takeFirst();
             worker->current = job;
             worker->busy = true;
