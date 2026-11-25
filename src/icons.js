@@ -1,7 +1,7 @@
 .pragma library
 
-// Small stroke icons on a 24 px grid, tinted at runtime so they follow the
-// theme. Drawn for Omanote.
+// Small stroke icons on a 24 px grid, drawn by OmIcon as vector shapes and
+// tinted at runtime so they follow the theme. Drawn for Omanote.
 var paths = {
     back: "M15 18l-6-6 6-6",
     close: "M6 6l12 12M18 6L6 18",
@@ -23,10 +23,3 @@ var paths = {
     help: "M12 21a9 9 0 1 0 0-18 9 9 0 0 0 0 18z M9.5 9a2.6 2.6 0 0 1 5 .9c0 1.7-2.5 2.4-2.5 4 M12 17h.01",
     check: "M5 12l5 5 9-10"
 };
-
-function source(name, color, weight) {
-    var svg = "<svg xmlns='http://www.w3.org/2000/svg' viewBox='0 0 24 24' fill='none' stroke='" + color +
-              "' stroke-width='" + (weight || 1.8) + "' stroke-linecap='round' stroke-linejoin='round'><path d='" +
-              (paths[name] || "") + "'/></svg>";
-    return "data:image/svg+xml;utf8," + encodeURIComponent(svg);
-}
