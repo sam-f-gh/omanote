@@ -1,0 +1,19 @@
+<RCC>
+    <qresource prefix="/">
+        <file alias="Main.qml">Main.qml</file>
+        <file alias="Workspace.qml">Workspace.qml</file>
+        <file alias="StartScreen.qml">StartScreen.qml</file>
+        <file alias="TopBar.qml">TopBar.qml</file>
+        <file alias="ToolShelf.qml">ToolShelf.qml</file>
+        <file alias="ColorGrid.qml">ColorGrid.qml</file>
+        <file alias="HelpOverlay.qml">HelpOverlay.qml</file>
+        <file alias="ConfirmDialog.qml">ConfirmDialog.qml</file>
+        <file alias="IconButton.qml">IconButton.qml</file>
+        <file alias="OmIcon.qml">OmIcon.qml</file>
+        <file alias="Pill.qml">Pill.qml</file>
+        <file alias="TextButton.qml">TextButton.qml</file>
+        <file alias="icons.js">icons.js</file>
+        <file alias="i18n/en.json">i18n/en.json</file>
+        <file alias="i18n/da.json">i18n/da.json</file>
+    </qresource>
+</RCC>

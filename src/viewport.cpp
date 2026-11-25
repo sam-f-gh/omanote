@@ -65,7 +65,12 @@ int Viewport::pageAt(QPointF screen, QPointF *local) const {
 int Viewport::currentPage() const {
     if (m_sizes.isEmpty())
         return -1;
-    const double y = toDoc({0, m_view.height() / 2}).y();
+    // Scrolled to the very end: the last page is the current one.
+    if (maxScrollY() > 0 && m_scrollY >= maxScrollY() - 0.5)
+        return int(m_sizes.size()) - 1;
+    // Otherwise the page crossing a line a third of the way down, so a page
+    // reached by "next" (its top at the top) is the current one.
+    const double y = toDoc({0, std::min(m_view.height() / 3, Pad + 40)}).y();
     auto it = std::upper_bound(m_tops.begin(), m_tops.end(), y);
     return std::clamp(int(it - m_tops.begin()) - 1, 0, int(m_sizes.size()) - 1);
 }

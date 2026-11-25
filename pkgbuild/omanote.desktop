@@ -1,0 +1,12 @@
+[Desktop Entry]
+Type=Application
+Name=Omanote
+Comment=Handwritten notes and PDF annotation
+Comment[da]=Håndskrevne noter og PDF-kommentarer
+Exec=omanote %f
+Icon=omanote
+Terminal=false
+MimeType=application/pdf;
+Categories=Office;Graphics;Viewer;
+Keywords=notes;pdf;annotate;pen;stylus;handwriting;
+StartupWMClass=omanote
