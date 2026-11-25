@@ -8,8 +8,8 @@ touchscreens with a pen and just as fast with mouse and keyboard.
 - **New Note** — endless white paper. Write on the last page and a fresh one
   appears below. Saving keeps the first through the last page with ink.
 - **Open PDF** — write over any PDF without flattening it: text stays
-  selectable, vectors stay vectors. Your first save asks where, so originals
-  are never overwritten.
+  selectable, vectors stay vectors. `Ctrl+S` saves in place; `Ctrl+Shift+S`
+  saves a copy.
 - **Re-edit forever** — ink is saved twice: as a vector layer ("Omanote Ink")
   any viewer shows, and as stroke data Omanote reads back, so old strokes stay
   erasable and re-saving never stacks ghost copies.
@@ -26,7 +26,7 @@ language live.
 | `P` / `H` / `E` | Pen / Highlighter / Eraser |
 | `Ctrl+Z` | Undo |
 | `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
-| `Ctrl+S` | Save (Save As the first time) |
+| `Ctrl+S` | Save (asks where only for a never-saved note) |
 | `Ctrl+Shift+S` | Save As |
 | `Ctrl+O` / `Ctrl+N` | Open PDF / New Note |
 | `PageDown` / `N`, `PageUp` / `B` | Next / previous page |

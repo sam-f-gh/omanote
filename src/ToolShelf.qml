@@ -20,20 +20,20 @@ Pill {
         else backend.penColor = c
     }
 
-    width: row.implicitWidth + 16
-    height: 52
+    width: 52
+    height: column.implicitHeight + 12
 
-    RowLayout {
-        id: row
+    ColumnLayout {
+        id: column
         anchors.centerIn: parent
-        spacing: 4
+        spacing: 2
 
         Repeater {
             model: shelf.eraser ? [] : shelf.colors
             AbstractButton {
                 id: swatch
                 required property string modelData
-                implicitWidth: 36; implicitHeight: 40
+                implicitWidth: 40; implicitHeight: 36
                 focusPolicy: Qt.NoFocus
                 // Long-press or double-tap opens the full grid.
                 onPressAndHold: grid.openFor(swatch)
@@ -67,7 +67,8 @@ Pill {
             color: shelf.current
             border.width: 2
             border.color: theme.accent
-            Layout.leftMargin: 4; Layout.rightMargin: 4
+            Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: 4; Layout.bottomMargin: 4
         }
 
         IconButton {
@@ -80,9 +81,10 @@ Pill {
 
         Rectangle {
             visible: !shelf.eraser
-            width: 1; height: 24
+            width: 24; height: 1
             color: Qt.alpha(theme.foreground, 0.12)
-            Layout.leftMargin: 4; Layout.rightMargin: 4
+            Layout.alignment: Qt.AlignHCenter
+            Layout.topMargin: 4; Layout.bottomMargin: 4
         }
 
         Repeater {
@@ -108,8 +110,8 @@ Pill {
                         anchors.centerIn: parent
                         readonly property real d: shelf.highlighter ? [8, 12, 17][sizeButton.modelData]
                                                                     : [4, 7, 12][sizeButton.modelData]
-                        width: shelf.highlighter ? 8 : d
-                        height: d
+                        width: d
+                        height: shelf.highlighter ? 8 : d
                         radius: shelf.highlighter ? 2 : d / 2
                         color: shelf.highlighter ? shelf.current : theme.foreground
                     }
@@ -117,9 +119,10 @@ Pill {
             }
         }
 
-        TextButton {
+        IconButton {
             visible: shelf.eraser
-            text: qsTr("Clear Page")
+            glyph: "trash"
+            tip: qsTr("Clear Page")
             onClicked: shelf.clearRequested()
         }
     }

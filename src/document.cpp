@@ -90,9 +90,6 @@ Document *Document::open(const QString &path, QString *error, QObject *parent) {
     doc->m_filePath = QFileInfo(path).absoluteFilePath();
     doc->m_fromOmanote = loaded.omanote;
     doc->m_external = loaded.origin != "note";
-    // A file Omanote already wrote is ours to overwrite; anyone else's PDF
-    // gets Save As first so the original is never replaced silently.
-    doc->m_savedHere = loaded.omanote;
     for (const auto &data : loaded.pages) {
         auto p = std::make_shared<Page>();
         p->id = newId();
@@ -134,7 +131,6 @@ bool Document::save(const QString &path, QString *error) {
         return false;
     }
     m_filePath = QFileInfo(path).absoluteFilePath();
-    m_savedHere = true;
     m_fromOmanote = true;
     if (first > 0) {
         // Leading blanks are gone from the file, so drop them here too. Their

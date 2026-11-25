@@ -110,8 +110,6 @@ bool Backend::openFile(const QString &pathOrUrl) {
     }
     clearError();
     setDocument(doc);
-    if (doc->isExternal() && !doc->fromOmanote())
-        emit status(tr("Annotating a copy: the first save asks where"));
     return true;
 }
 

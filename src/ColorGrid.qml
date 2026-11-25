@@ -8,8 +8,9 @@ Popup {
     signal picked(string color)
 
     function openFor(item) {
-        const p = item.mapToItem(parent, 0, item.height + 8)
-        x = Math.max(0, p.x - 12)
+        // Opens beside the vertical shelf, level with the button.
+        const p = item.mapToItem(parent, item.width + 14, -8)
+        x = p.x
         y = p.y
         open()
     }

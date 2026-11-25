@@ -340,16 +340,22 @@ void NoteView::paintPage(QPainter &p, int index, const QRectF &rect) {
         p.drawImage(rect, cache.background);
     }
 
-    const bool live = m_stroke && m_strokePage == page;
-    if (!drewInk || live) {
+    if (!drewInk) {
         p.save();
         p.setClipRect(rect, Qt::IntersectClip);
         p.translate(rect.topLeft());
         p.scale(rect.width() / page->size.width(), rect.height() / page->size.height());
-        if (!drewInk)
-            Ink::paint(p, page->strokes);
-        if (live)
-            Ink::paintOne(p, *m_stroke);
+        Ink::paint(p, page->strokes);
+        p.restore();
+    }
+    if (m_stroke && m_strokePage == page && !m_live.isNull()) {
+        p.save();
+        p.setClipRect(rect, Qt::IntersectClip);
+        if (m_stroke->tool == Tool::Highlighter) {
+            p.setCompositionMode(QPainter::CompositionMode_Multiply);
+            p.setOpacity(Ink::HighlightAlpha);
+        }
+        p.drawImage(QPointF(0, 0), m_live);
         p.restore();
     }
 }
@@ -367,6 +373,52 @@ QRectF NoteView::strokeScreenRect(int from) const {
     r.adjust(-reach, -reach, reach, reach);
     const QRectF page = m_view.pageScreenRect(index);
     return QRectF(page.topLeft() + r.topLeft() * m_view.zoom(), r.size() * m_view.zoom()).adjusted(-2, -2, 2, 2);
+}
+
+void NoteView::drawLive(int from) {
+    if (!m_stroke || !m_doc)
+        return;
+    const int index = m_doc->indexOf(m_strokePage);
+    if (index < 0)
+        return;
+    const QRectF page = snapped(m_view.pageScreenRect(index));
+    const double d = deviceRatio();
+    const QSize size(int(std::ceil(width() * d)), int(std::ceil(height() * d)));
+    if (m_live.size() != size || m_live.devicePixelRatio() != d) {
+        m_live = QImage(size, QImage::Format_ARGB32_Premultiplied);
+        m_live.setDevicePixelRatio(d);
+        m_live.fill(Qt::transparent);
+        m_liveDirty = {};
+        m_liveZoom = 0;
+    }
+    QPainter lp(&m_live);
+    // The view moved under the stroke (or it just began): start the layer over.
+    if (m_liveZoom != m_view.zoom() || m_liveOrigin != page.topLeft()) {
+        lp.setCompositionMode(QPainter::CompositionMode_Source);
+        lp.fillRect(m_liveDirty, Qt::transparent);
+        lp.setCompositionMode(QPainter::CompositionMode_SourceOver);
+        m_liveDirty = {};
+        m_liveZoom = m_view.zoom();
+        m_liveOrigin = page.topLeft();
+        from = 0;
+    }
+    // Redraw only the last few segments: the spline reshapes the previous
+    // segment as each sample arrives, and opaque overdraw is harmless.
+    Stroke tail;
+    tail.tool = m_stroke->tool;
+    tail.width = m_stroke->width;
+    tail.samples = m_stroke->samples.mid(std::max(0, from));
+    QColor c = m_stroke->color;
+    c.setAlpha(255);
+    lp.setRenderHint(QPainter::Antialiasing);
+    lp.setClipRect(page);
+    lp.translate(page.topLeft());
+    lp.scale(m_view.zoom(), m_view.zoom());
+    lp.setPen(Qt::NoPen);
+    lp.setBrush(c);
+    lp.drawPath(tail.path());
+    m_liveDirty |= QRectF(page.topLeft() + tail.bounds().topLeft() * m_view.zoom(),
+                          tail.bounds().size() * m_view.zoom()).adjusted(-2, -2, 2, 2);
 }
 
 void NoteView::setHover(QPointF pos, bool visible) {
@@ -410,6 +462,8 @@ void NoteView::beginStroke(QPointF pos, double pressure, bool erase, Source sour
     m_stroke->width = float(activeWidth(m_tool));
     m_smoothedPressure = pressure;
     m_stroke->samples.append({float(local.x()), float(local.y()), float(pressure)});
+    m_liveZoom = 0; // Clears the previous stroke's layer.
+    drawLive(0);
     update(strokeScreenRect(0).toAlignedRect());
 }
 
@@ -432,6 +486,7 @@ void NoteView::extendStroke(QPointF pos, double pressure) {
         return;
     m_stroke->samples.append({float(local.x()), float(local.y()), float(m_smoothedPressure)});
     m_stroke->invalidate();
+    drawLive(m_stroke->samples.size() - 4);
     m_last = pos;
     // The spline reshapes the previous couple of segments too.
     update(strokeScreenRect(m_stroke->samples.size() - 4).toAlignedRect());
@@ -447,16 +502,19 @@ void NoteView::endStroke() {
         stroke->invalidate();
         const int before = page->revision;
         m_doc->addStroke(page, stroke);
-        // A pen stroke lands on top of everything, so paint it straight onto
-        // the cached page instead of recompositing every stroke.
+        // A pen stroke lands on top of everything, and the live layer already
+        // holds it at this exact scale: copy those pixels into the page cache
+        // instead of filling the whole outline again.
         auto it = m_cache.find(page->id);
+        const int index = m_doc->indexOf(page);
+        const double scale = m_view.zoom() * deviceRatio();
         if (it != m_cache.end() && stroke->tool == Tool::Pen && it->compositeRevision == before &&
-            !it->composite.isNull()) {
+            !it->composite.isNull() && std::abs(it->compositeScale - scale) < 1e-6 && index >= 0 &&
+            m_liveZoom == m_view.zoom() && m_liveOrigin == snapped(m_view.pageScreenRect(index)).topLeft()) {
+            const double d = deviceRatio();
+            const QRectF source(m_liveOrigin * d, QSizeF(it->composite.size()));
             QPainter cp(&it->composite);
-            const double s = it->compositeScale / deviceRatio();
-            cp.scale(s, s);
-            cp.setClipRect(QRectF(QPointF(0, 0), page->size));
-            Ink::paintOne(cp, *stroke);
+            cp.drawImage(QRectF(QPointF(0, 0), QSizeF(it->composite.size()) / d), m_live, source);
             it->compositeRevision = page->revision;
         }
         update();

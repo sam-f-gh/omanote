@@ -127,6 +127,7 @@ private slots:
     void newNoteKeepsTrailingBlank() {
         std::unique_ptr<Document> doc(Document::createNote());
         QCOMPARE(doc->pageCount(), 1);
+        QVERIFY(doc->needsSaveAs()); // Only a never-saved note asks where.
         doc->addStroke(doc->page(0), line({10, 10}, {50, 50}));
         QCOMPARE(doc->pageCount(), 2);
         QVERIFY(!doc->page(1)->hasInk());
@@ -197,12 +198,11 @@ private slots:
         std::unique_ptr<Document> doc(Document::open(src, &error));
         QVERIFY2(doc, qPrintable(error));
         QCOMPARE(doc->pageCount(), 2);
-        QVERIFY(doc->needsSaveAs());
+        QVERIFY(!doc->needsSaveAs()); // An existing file saves in place.
         doc->addStroke(doc->page(0), line({72, 120}, {300, 120}));
         doc->insertPage(2); // blank note page at the end, trimmed on save
         QVERIFY(doc->save(dir.path() + "/out.pdf", &error));
         QCOMPARE(popplerPages(dir.path() + "/out.pdf"), 2);
-        QVERIFY(!doc->needsSaveAs());
     }
 
     // --- Round trip ------------------------------------------------------

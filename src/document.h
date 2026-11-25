@@ -59,8 +59,9 @@ public:
     QString filePath() const { return m_filePath; }
     bool fromOmanote() const { return m_fromOmanote; }
     bool isExternal() const { return m_external; }
-    // First save of a new note or of a foreign PDF asks where; later ones overwrite.
-    bool needsSaveAs() const { return m_filePath.isEmpty() || !m_savedHere; }
+    // Only a note that has never been saved asks where; any file that exists
+    // on disk is saved in place.
+    bool needsSaveAs() const { return m_filePath.isEmpty(); }
 
     bool canUndo() const { return m_index > 0; }
     bool canRedo() const { return m_index < int(m_history.size()); }
@@ -97,7 +98,6 @@ private:
     QString m_filePath;
     bool m_fromOmanote = false;
     bool m_external = false;
-    bool m_savedHere = false;
     std::vector<std::unique_ptr<Command>> m_history;
     int m_index = 0;
     int m_savedIndex = 0;

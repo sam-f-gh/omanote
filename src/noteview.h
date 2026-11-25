@@ -124,6 +124,7 @@ private:
     void paintPage(QPainter &p, int index, const QRectF &rect);
     void buildComposite(const Page &page, Cache &cache, double scale);
     QRectF strokeScreenRect(int fromSample) const;
+    void drawLive(int fromSample);
     QColor activeColor(Tool tool) const;
     double activeWidth(Tool tool) const;
 
@@ -150,6 +151,13 @@ private:
     PagePtr m_strokePage;
     StrokePtr m_stroke;
     double m_smoothedPressure = 0.5;
+    // The stroke being drawn, rendered opaque into a view-sized layer one
+    // tail at a time, so each sample costs the same however long the stroke.
+    // Highlighters get their alpha and multiply when the layer is composited.
+    QImage m_live;
+    QRectF m_liveDirty;
+    double m_liveZoom = 0;
+    QPointF m_liveOrigin;
     QPointF m_last;
     QPointF m_lastEraseDoc;
     int m_erasePage = -1;

@@ -88,16 +88,35 @@ void addQuad(QPainterPath &path, QPointF a, QPointF b, QPointF c, QPointF d) {
 }
 
 // The hull of two circles: the trapezoid between their outer tangents.
-void addCapsuleBody(QPainterPath &path, const Node &n0, const Node &n1) {
+struct Body {
+    bool valid = false;
+    QPointF a1, b1, a2, b2;  // Start/end points on each tangent side.
+};
+
+void addTriangle(QPainterPath &path, QPointF a, QPointF b, QPointF c) {
+    const double area = (b.x() - a.x()) * (c.y() - a.y()) - (c.x() - a.x()) * (b.y() - a.y());
+    if (std::abs(area) < 1e-9)
+        return;
+    if (area < 0)
+        std::swap(b, c);
+    path.moveTo(a);
+    path.lineTo(b);
+    path.lineTo(c);
+    path.closeSubpath();
+}
+
+Body addCapsuleBody(QPainterPath &path, const Node &n0, const Node &n1) {
     const QPointF d = n1.pt - n0.pt;
     const double len = std::hypot(d.x(), d.y());
     if (len <= std::abs(n0.r - n1.r) + 1e-6)
-        return; // One circle contains the other.
+        return {}; // One circle contains the other.
     const double theta = std::atan2(d.y(), d.x());
     const double alpha = std::acos(std::clamp((n0.r - n1.r) / len, -1.0, 1.0));
     const QPointF u1(std::cos(theta + alpha), std::sin(theta + alpha));
     const QPointF u2(std::cos(theta - alpha), std::sin(theta - alpha));
-    addQuad(path, n0.pt + u1 * n0.r, n1.pt + u1 * n1.r, n1.pt + u2 * n1.r, n0.pt + u2 * n0.r);
+    Body body{true, n0.pt + u1 * n0.r, n1.pt + u1 * n1.r, n0.pt + u2 * n0.r, n1.pt + u2 * n1.r};
+    addQuad(path, body.a1, body.b1, body.b2, body.a2);
+    return body;
 }
 
 QPointF catmull(QPointF p0, QPointF p1, QPointF p2, QPointF p3, double t) {
@@ -112,6 +131,32 @@ QByteArray num(double v) {
         if (s.endsWith('.')) s.chop(1);
     }
     return s == "-0" ? "0" : s;
+}
+}
+
+namespace {
+// The spline the outline follows, densified so curves read smooth at any
+// zoom. Hit testing walks the same nodes, so the eraser touches exactly what
+// is drawn even where fast strokes curve far from their raw samples.
+QVector<Node> densify(const Stroke &stroke) {
+    const int n = stroke.samples.size();
+    QVector<Node> nodes;
+    if (n == 0)
+        return nodes;
+    nodes.reserve(n * 3);
+    for (int i = 0; i < n - 1; ++i) {
+        const QPointF p0 = stroke.point(std::max(0, i - 1)), p1 = stroke.point(i), p2 = stroke.point(i + 1),
+                      p3 = stroke.point(std::min(n - 1, i + 2));
+        const double r1 = stroke.radius(i), r2 = stroke.radius(i + 1);
+        const double len = QLineF(p1, p2).length();
+        const int steps = std::clamp(int(std::ceil(len / 1.5)), 1, 12);
+        for (int s = 0; s < steps; ++s) {
+            const double t = double(s) / steps;
+            nodes.append({s == 0 ? p1 : catmull(p0, p1, p2, p3, t), r1 + (r2 - r1) * t, s == 0});
+        }
+    }
+    nodes.append({stroke.point(n - 1), stroke.radius(n - 1), true});
+    return nodes;
 }
 }
 
@@ -142,29 +187,38 @@ QPainterPath outline(const Stroke &stroke) {
         return path;
     }
 
-    // Densify along a Catmull-Rom spline so curves read smooth at any zoom.
-    QVector<Node> nodes;
-    nodes.reserve(n * 3);
-    for (int i = 0; i < n - 1; ++i) {
-        const QPointF p0 = stroke.point(std::max(0, i - 1)), p1 = stroke.point(i), p2 = stroke.point(i + 1),
-                      p3 = stroke.point(std::min(n - 1, i + 2));
-        const double r1 = stroke.radius(i), r2 = stroke.radius(i + 1);
-        const double len = QLineF(p1, p2).length();
-        const int steps = std::clamp(int(std::ceil(len / 1.5)), 1, 12);
-        for (int s = 0; s < steps; ++s) {
-            const double t = double(s) / steps;
-            nodes.append({s == 0 ? p1 : catmull(p0, p1, p2, p3, t), r1 + (r2 - r1) * t, s == 0});
-        }
-    }
-    nodes.append({stroke.point(n - 1), stroke.radius(n - 1), true});
+    const QVector<Node> nodes = densify(stroke);
 
     // Round joints only where the input turned; between spline steps the
     // tangent change is far below a hairline.
-    for (int i = 0; i < nodes.size(); ++i)
-        if (nodes[i].joint)
+    // A joint needs its round cap only where the stroke turns noticeably or
+    // ends; on gentle curves the capsules already meet within a hairline
+    // (gap depth ≈ r·θ²/8), and skipping those circles keeps paths light.
+    for (int i = 0; i < nodes.size(); ++i) {
+        if (!nodes[i].joint)
+            continue;
+        bool round = i == 0 || i == nodes.size() - 1;
+        if (!round) {
+            const QPointF a = nodes[i].pt - nodes[i - 1].pt, b = nodes[i + 1].pt - nodes[i].pt;
+            const double la = std::hypot(a.x(), a.y()), lb = std::hypot(b.x(), b.y());
+            round = la < 1e-6 || lb < 1e-6 ||
+                    QPointF::dotProduct(a, b) / (la * lb) < std::cos(0.3) ||
+                    std::abs(nodes[i - 1].r - nodes[i + 1].r) > 0.5 * nodes[i].r;
+        }
+        if (round)
             addCircle(path, nodes[i].pt, nodes[i].r);
-    for (int i = 0; i + 1 < nodes.size(); ++i)
-        addCapsuleBody(path, nodes[i], nodes[i + 1]);
+    }
+    // Consecutive bodies meet at an angle wherever the spline bends, leaving
+    // a thin wedge on the outside of the curve; a triangle per side closes it.
+    Body previous;
+    for (int i = 0; i + 1 < nodes.size(); ++i) {
+        const Body body = addCapsuleBody(path, nodes[i], nodes[i + 1]);
+        if (previous.valid && body.valid) {
+            addTriangle(path, nodes[i].pt, previous.b1, body.a1);
+            addTriangle(path, nodes[i].pt, previous.b2, body.a2);
+        }
+        previous = body;
+    }
     return path;
 }
 
@@ -217,9 +271,10 @@ bool hits(const Stroke &stroke, QPointF a, QPointF b, double r) {
         return false;
     if (n == 1)
         return segmentDistance(a, b, stroke.point(0), stroke.point(0)) <= r + stroke.radius(0);
-    for (int i = 0; i + 1 < n; ++i) {
-        const double reach = r + std::max(stroke.radius(i), stroke.radius(i + 1));
-        if (segmentDistance(a, b, stroke.point(i), stroke.point(i + 1)) <= reach)
+    const QVector<Node> nodes = densify(stroke);
+    for (int i = 0; i + 1 < nodes.size(); ++i) {
+        const double reach = r + std::max(nodes[i].r, nodes[i + 1].r);
+        if (segmentDistance(a, b, nodes[i].pt, nodes[i + 1].pt) <= reach)
             return true;
     }
     return false;
