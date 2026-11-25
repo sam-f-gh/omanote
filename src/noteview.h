@@ -119,6 +119,8 @@ private:
     void panTo(QPointF pos);
     void endPan();
     void stopFling() { m_flinging = false; }
+    void startFling(QPointF velocity);
+    bool scrollBy(double dx, double dy);
     void flingFrame();
     bool touchBlocked() const;
     void setHover(QPointF pos, bool visible);
@@ -178,6 +180,9 @@ private:
     bool m_flinging = false;
     QPointF m_flingVelocity;
     QElapsedTimer m_flingClock;
+    // Touchpad scrolling keeps its own velocity, flung on lift like a finger.
+    QPointF m_wheelVelocity;
+    QElapsedTimer m_wheelClock;
 
     Tool m_tool = Tool::Pen;
     QColor m_penColor{0x18, 0x18, 0x1c};

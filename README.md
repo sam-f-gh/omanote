@@ -47,6 +47,10 @@ language live.
 | Mouse | Left draws, middle pans, wheel scrolls | Left or middle pans |
 
 Touches are ignored while the pen is near or down, and for 200 ms after.
+Finger, touchpad and pen-in-the-margin swipes carry on with momentum when
+lifted. You can scroll up to a whole page above the first page (to write
+low on the screen), and scrolling past the end of a notebook keeps adding
+fresh paper; unused sheets are trimmed when saving.
 
 ## Build
 

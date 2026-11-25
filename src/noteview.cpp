@@ -815,7 +815,7 @@ void NoteView::panTo(QPointF pos) {
     QPointF d = pos - m_last;
     if (m_gesture == Gesture::VerticalPan)
         d.setX(0);
-    m_view.panBy(d.x(), d.y());
+    scrollBy(d.x(), d.y());
     const double dt = std::max<qint64>(1, m_panClock.restart());
     m_panVelocity = 0.7 * (d / double(dt)) + 0.3 * m_panVelocity;
     m_last = pos;
@@ -823,14 +823,33 @@ void NoteView::panTo(QPointF pos) {
 }
 
 void NoteView::endPan() {
-    if (m_source == Source::Touch && m_panClock.elapsed() < 60 && length(m_panVelocity) > 0.3) {
-        m_flingVelocity = m_panVelocity;
-        m_flinging = true;
-        m_flingClock.restart();
-        update(); // Frames drive the fling from here.
-    }
+    // A finger or the pen in the margin carries on with its momentum when
+    // lifted mid-swipe; a mouse drag stops where it's let go.
+    if ((m_source == Source::Touch || m_source == Source::Stylus) && m_panClock.elapsed() < 60)
+        startFling(m_panVelocity);
     m_gesture = Gesture::None;
     m_source = Source::None;
+}
+
+void NoteView::startFling(QPointF velocity) {
+    if (length(velocity) <= 0.3)
+        return;
+    m_flingVelocity = velocity;
+    m_flinging = true;
+    m_flingClock.restart();
+    update(); // Frames drive the fling from here.
+}
+
+// Every user scroll goes through here. Pushing past the end of a notebook
+// adds a fresh sheet, so there's always paper below; returns whether it did.
+bool NoteView::scrollBy(double dx, double dy) {
+    m_view.panBy(dx, dy);
+    if (dy < 0 && m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 &&
+        m_doc->pages().last()->note && m_view.scrollY() >= m_view.maxScrollY() - 0.5) {
+        m_doc->appendPaper();
+        return true;
+    }
+    return false;
 }
 
 // --- Input ------------------------------------------------------------------
@@ -1011,17 +1030,41 @@ void NoteView::hoverLeaveEvent(QHoverEvent *) { setHover(m_overlay->hover, false
 
 void NoteView::wheelEvent(QWheelEvent *e) {
     e->accept();
-    stopFling();
     emit interacted();
     if (e->modifiers() & Qt::ControlModifier) {
+        stopFling();
         const double steps = e->angleDelta().y() / 120.0;
         zoomTo(m_view.zoom() * std::pow(1.15, steps), e->position());
         return;
     }
+    // Touchpads report scroll phases: fingers down (begin), moving (update),
+    // lifted (end). Track the swipe's velocity and fling on lift, exactly
+    // like a finger on the screen. Mouse wheels (no phase) just step.
+    switch (e->phase()) {
+    case Qt::ScrollBegin:
+        stopFling();
+        m_wheelVelocity = {};
+        m_wheelClock.restart();
+        break;
+    case Qt::ScrollEnd:
+        if (m_wheelClock.isValid() && m_wheelClock.elapsed() < 80)
+            startFling(m_wheelVelocity);
+        m_wheelVelocity = {};
+        return;
+    case Qt::ScrollMomentum:
+        break; // The platform already supplies momentum (macOS); don't add ours.
+    default:
+        stopFling();
+        break;
+    }
     QPointF d = !e->pixelDelta().isNull() ? QPointF(e->pixelDelta()) : QPointF(e->angleDelta()) / 120.0 * 60.0;
     if ((e->modifiers() & Qt::ShiftModifier) && d.x() == 0)
         d = {d.y(), 0};
-    m_view.panBy(d.x(), d.y());
+    if (e->phase() == Qt::ScrollUpdate) {
+        const double dt = std::max<qint64>(1, m_wheelClock.restart());
+        m_wheelVelocity = 0.6 * (d / dt) + 0.4 * m_wheelVelocity;
+    }
+    scrollBy(d.x(), d.y());
     viewMoved();
 }
 
@@ -1094,10 +1137,11 @@ void NoteView::flingFrame() {
         return;
     const double dt = std::clamp<double>(m_flingClock.restart(), 1, 50);
     const double y = m_view.scrollY(), x = m_view.panX();
-    m_view.panBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
+    const bool grew = scrollBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
     // Same decay per millisecond whatever the refresh rate.
     m_flingVelocity *= std::pow(0.94, dt / 16.0);
-    if (length(m_flingVelocity) < 0.02 || (y == m_view.scrollY() && x == m_view.panX()))
+    // A fling into the end of a notebook rolls on into the fresh sheet.
+    if (length(m_flingVelocity) < 0.02 || (!grew && y == m_view.scrollY() && x == m_view.panX()))
         m_flinging = false;
     viewMoved();
 }

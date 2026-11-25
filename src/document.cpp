@@ -268,6 +268,11 @@ PagePtr Document::insertPage(int index) {
     return page;
 }
 
+void Document::appendPaper() {
+    m_pages.append(blankPage(m_pages.isEmpty() ? QSizeF(A4Width, A4Height) : m_pages.last()->size));
+    emit pagesChanged();
+}
+
 void Document::undo() {
     endErase();
     if (!canUndo())

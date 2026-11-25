@@ -91,6 +91,9 @@ public:
     void endErase();
     bool clearPage(const PagePtr &page);
     PagePtr insertPage(int index);
+    // Fresh paper at the end, outside undo history (like the trailing sheet):
+    // scrolling past the end of a notebook keeps finding paper.
+    void appendPaper();
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
 

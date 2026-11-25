@@ -13,9 +13,6 @@ public:
     static constexpr double Gap = 18;      // Points between pages.
     static constexpr double Pad = 24;      // Pixels above the first and below the last page.
     static constexpr double MinZoom = 0.25, MaxZoom = 4.0;
-    // How far above the first page you can scroll, as a share of the view,
-    // so a fresh page can sit low on the screen where the hand rests.
-    static constexpr double TopSlack = 0.6;
 
     void setPages(const QList<QSizeF> &sizes);
     void setViewSize(QSizeF size);
@@ -30,7 +27,9 @@ public:
     double docHeight() const;
     double maxPanX() const;
     double maxScrollY() const;
-    double minScrollY() const { return -m_view.height() * TopSlack; }
+    // A whole first page's worth of room above the first page, so a fresh
+    // sheet can sit as low on the screen as the hand likes.
+    double minScrollY() const { return m_sizes.isEmpty() ? 0 : -m_sizes.first().height() * m_zoom; }
     bool horizontallyLocked() const { return m_docWidth * m_zoom <= m_view.width(); }
 
     QRectF pageDocRect(int index) const;

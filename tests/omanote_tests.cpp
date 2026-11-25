@@ -178,6 +178,15 @@ private slots:
         QCOMPARE(doc->page(0)->strokes.size(), 1);
     }
 
+    void appendPaperStaysOutOfHistory() {
+        std::unique_ptr<Document> doc(Document::createNote());
+        doc->appendPaper();
+        QCOMPARE(doc->pageCount(), 2);
+        QVERIFY(!doc->dirty());
+        QVERIFY(!doc->canUndo());
+        QCOMPARE(doc->saveRange(), std::make_pair(0, 0)); // Trimmed on save.
+    }
+
     // --- Trimming ---------------------------------------------------------
     void trimsLeadingAndTrailingBlanks() {
         QTemporaryDir dir;
@@ -438,8 +447,10 @@ private slots:
         v.zoomAt(1.0, {900, 400});
         QCOMPARE(v.panX(), 0.0);
         v.panBy(0, 100000);
-        QCOMPARE(v.scrollY(), -800 * Viewport::TopSlack); // Room above page one.
-        QVERIFY(v.toScreen(v.pageDocRect(0).topLeft()).y() > 400);
+        // A whole first page of room above page one: its top can reach
+        // the bottom of the view and beyond.
+        QCOMPARE(v.scrollY(), -842 * v.zoom());
+        QVERIFY(v.toScreen(v.pageDocRect(0).topLeft()).y() > 800);
         v.panBy(0, -100000);
         QCOMPARE(v.scrollY(), v.maxScrollY());
         QCOMPARE(v.zoom(), 1.0);
