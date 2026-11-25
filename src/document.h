@@ -15,7 +15,7 @@
 struct Page {
     quint64 id = 0;
     QSizeF size{595.28, 842};
-    int source = -1;   // Page index in Document::sourcePdf, or -1 for fresh paper.
+    int source = -1;   // Page index in Document::source(), or -1 for fresh paper.
     bool note = true;  // Blank paper Omanote made (trimmable), not an original page.
     QList<StrokePtr> strokes;
     int revision = 0;  // Bumped on every ink change, for render caches.
@@ -30,7 +30,7 @@ class Command;
 // Everything a save needs, captured on the GUI thread so the PDF can be
 // built on a worker while the user keeps writing.
 struct SaveJob {
-    QByteArray source;
+    SourcePtr source;
     QList<PdfStore::PageData> pages;       // Copied on the GUI thread.
     QString origin;
     QList<PagePtr> leadingBlanks;          // Dropped from memory once saved.
@@ -72,7 +72,7 @@ public:
     // The pages a save would write, by index: [first, last].
     std::pair<int, int> saveRange() const;
 
-    QByteArray sourcePdf() const { return m_source; }
+    SourcePtr source() const { return m_source; }
     QString filePath() const { return m_filePath; }
     bool fromOmanote() const { return m_fromOmanote; }
     bool isExternal() const { return m_external; }
@@ -119,7 +119,7 @@ private:
     void ensureTrailingPage();
 
     QList<PagePtr> m_pages;
-    QByteArray m_source;
+    SourcePtr m_source;
     QString m_filePath;
     bool m_fromOmanote = false;
     bool m_external = false;

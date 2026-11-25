@@ -285,8 +285,8 @@ private slots:
         // Opening rewrites nothing: the old ink is hidden through its layer.
         QFile saved(out);
         QVERIFY(saved.open(QIODevice::ReadOnly));
-        QCOMPARE(again->sourcePdf(), saved.readAll());
-        auto raw = Poppler::Document::loadFromData(again->sourcePdf());
+        QCOMPARE(again->source()->readAll(), saved.readAll());
+        auto raw = Poppler::Document::load(again->source()->path());
         QVERIFY(raw->page(0)->renderToImage(72, 72).pixelColor(200, 500).value() < 80);
         TileRenderer::hideInk(*raw);
         QVERIFY(raw->page(0)->renderToImage(72, 72).pixelColor(200, 500).value() > 240);

@@ -13,6 +13,7 @@
 #include <vector>
 
 #include "ink.h"
+#include "pdfstore.h"
 
 class QThread;
 namespace Poppler { class Document; }
@@ -39,7 +40,7 @@ public:
     explicit TileRenderer(int threads = 2, QObject *parent = nullptr);
     ~TileRenderer() override;
 
-    void setPdf(const QByteArray &pdf);
+    void setPdf(const SourcePtr &source);
     // Replaces the whole wish list, most urgent first. In-flight renders no
     // longer wanted are aborted.
     void setJobs(const QList<Job> &jobs);
@@ -75,7 +76,7 @@ private:
     QWaitCondition m_wake;
     QList<Job> m_jobs;
     QList<Job> m_wanted;
-    QByteArray m_pdf;
+    SourcePtr m_pdf; // Held here too, so the file stays open while workers read it.
     std::atomic<int> m_generation{0};
     bool m_quit = false;
     std::vector<std::unique_ptr<Worker>> m_workers;

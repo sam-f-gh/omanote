@@ -14,6 +14,7 @@
 class QTabletEvent;
 class QSGImageNode;
 class QSGRectangleNode;
+class QSGGeometryNode;
 class LiveLayer;
 
 // The workspace: white pages on the themed backdrop, live ink, and every
@@ -163,19 +164,28 @@ private:
         bool operator==(const NodeKey &o) const { return page == o.page && scale == o.scale && tx == o.tx && ty == o.ty; }
     };
     friend size_t qHash(const NodeKey &k, size_t seed) { return qHashMulti(seed, k.page, k.scale, k.tx, k.ty); }
-    struct NodeEntry { QSGImageNode *node = nullptr; quint64 serial = 0; };
+    struct NodeEntry { QSGImageNode *node = nullptr; quint64 serial = 0; quint64 laidOut = 0; double pxPerUnit = 1; };
     QHash<NodeKey, NodeEntry> m_nodes;
     // A stable tree, so the renderer keeps its batches between frames:
     // root > backdrop, then per page: shadow/border/paper rects, stand-in
     // tiles (other scales), current tiles. Frames mostly just move rects.
     struct PageNode {
         QSGNode *group = nullptr;
-        QSGRectangleNode *rects[6] = {};
+        QSGGeometryNode *shadow = nullptr; // One soft ring, drawn only around the sheet.
+        QSGRectangleNode *paper = nullptr;
         QSGNode *standIns = nullptr;
         QSGNode *current = nullptr;
+        quint64 laidOut = 0;
     };
     QHash<quint64, PageNode> m_pageNodes;
     QSGRectangleNode *m_backdropNode = nullptr;
+    // Pages live under one transform: scrolling moves only it. Nodes are laid
+    // out again only when this stamp changes (zoom, width, scale, pages).
+    QSGTransformNode *m_contentNode = nullptr;
+    quint64 m_layoutStamp = 1;
+    struct LayoutKey { double zoom = 0, width = 0, dpr = 0; quint64 pages = 0; } m_layoutKey;
+    quint64 m_pagesVersion = 0;
+    QHash<quint64, int> m_indexById;
 
     // Kinetic scrolling, stepped once per rendered frame.
     bool m_flinging = false;
@@ -184,6 +194,7 @@ private:
     // Touchpad scrolling keeps its own velocity, flung on lift like a finger.
     QPointF m_wheelVelocity;
     QElapsedTimer m_wheelClock;
+    double m_overscroll = 0; // How hard the user has pushed past the end.
 
     Tool m_tool = Tool::Pen;
     QColor m_penColor{0x18, 0x18, 0x1c};
@@ -206,6 +217,11 @@ private:
     double m_liveZoom = 0;
     QPointF m_liveOrigin;
     QHash<quint64, int> m_pending; // Page -> revision the tiles must reach.
+
+    // Last values announced to QML, so bindings only re-run on real changes.
+    double m_shownZoom = -1;
+    int m_shownPage = -1, m_shownCount = -1;
+    QList<TileRenderer::Job> m_lastJobs;
 
     double m_pinchStartZoom = 1, m_pinchStartDistance = 1;
     QPointF m_pinchCentroid;

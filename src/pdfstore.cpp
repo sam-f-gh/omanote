@@ -6,6 +6,9 @@
 #include <QJsonDocument>
 #include <QJsonObject>
 #include <QSaveFile>
+#include <QTemporaryFile>
+#include <cstdio>
+#include <unistd.h>
 #include <algorithm>
 
 #include <qpdf/Buffer.hh>
@@ -15,6 +18,39 @@
 #include <qpdf/QPDFPageDocumentHelper.hh>
 #include <qpdf/QPDFPageObjectHelper.hh>
 #include <qpdf/QPDFWriter.hh>
+
+PdfSource::~PdfSource() = default;
+
+SourcePtr PdfSource::open(const QString &path, QString &error) {
+    auto file = std::make_unique<QFile>(path);
+    if (!file->exists()) {
+        error = QObject::tr("File not found: %1").arg(path);
+        return nullptr;
+    }
+    if (!file->open(QIODevice::ReadOnly)) {
+        error = QObject::tr("Can't read %1: %2").arg(path, file->errorString());
+        return nullptr;
+    }
+    auto source = std::shared_ptr<PdfSource>(new PdfSource);
+    source->m_file = std::move(file);
+    return source;
+}
+
+SourcePtr PdfSource::fromBytes(const QByteArray &bytes) {
+    auto file = std::make_unique<QTemporaryFile>();
+    if (!file->open() || file->write(bytes) != bytes.size() || !file->flush())
+        return nullptr;
+    auto source = std::shared_ptr<PdfSource>(new PdfSource);
+    source->m_file = std::move(file);
+    return source;
+}
+
+QString PdfSource::path() const { return QStringLiteral("/proc/self/fd/%1").arg(m_file->handle()); }
+
+QByteArray PdfSource::readAll() const {
+    QFile f(path());
+    return f.open(QIODevice::ReadOnly) ? f.readAll() : QByteArray();
+}
 
 namespace PdfStore {
 namespace {
@@ -283,23 +319,14 @@ QString describe(const std::exception &e) {
 }
 
 bool load(const QString &path, Loaded &out, QString &error) {
-    QFile file(path);
-    if (!file.exists()) {
-        error = QObject::tr("File not found: %1").arg(path);
+    const SourcePtr source = PdfSource::open(path, error);
+    if (!source)
         return false;
-    }
-    if (!file.open(QIODevice::ReadOnly)) {
-        error = QObject::tr("Can't read %1: %2").arg(path, file.errorString());
-        return false;
-    }
-    return loadBytes(file.readAll(), out, error);
-}
-
-bool loadBytes(const QByteArray &bytes, Loaded &out, QString &error) {
     try {
+        // qpdf reads lazily from the file: only the parts it needs.
         QPDF q;
         q.setSuppressWarnings(true);
-        q.processMemoryFile("document.pdf", bytes.constData(), size_t(bytes.size()));
+        q.processFile(source->path().toLocal8Bit().constData());
         QPDFPageDocumentHelper helper(q);
         auto pages = helper.getAllPages();
         if (pages.empty()) {
@@ -338,9 +365,9 @@ bool loadBytes(const QByteArray &bytes, Loaded &out, QString &error) {
         // foreign tool broke the layer wiring is a stripped copy needed.
         if ((omanote || ourInfo(q).isDictionary()) && !layerToggleable(q)) {
             strip(q);
-            out.pdf = writeMemory(q);
+            out.source = PdfSource::fromBytes(writeMemory(q));
         } else {
-            out.pdf = bytes;
+            out.source = source;
         }
         return true;
     } catch (const std::exception &e) {
@@ -349,15 +376,20 @@ bool loadBytes(const QByteArray &bytes, Loaded &out, QString &error) {
     }
 }
 
-bool build(const QByteArray &source, const QList<PageData> &pages, const QString &origin, QByteArray &out,
-           QString &error) {
+bool save(const SourcePtr &source, const QList<PageData> &pages, const QString &origin, const QString &path,
+          QString &error) {
+    QSaveFile file(path);
+    if (!file.open(QIODevice::WriteOnly)) {
+        error = QObject::tr("Couldn't save %1: %2").arg(path, file.errorString());
+        return false;
+    }
     try {
         QPDF q;
         q.setSuppressWarnings(true);
-        if (source.isEmpty())
-            q.emptyPDF();
+        if (source)
+            q.processFile(source->path().toLocal8Bit().constData());
         else
-            q.processMemoryFile("source.pdf", source.constData(), size_t(source.size()));
+            q.emptyPDF();
         strip(q);
 
         QPDFPageDocumentHelper helper(q);
@@ -409,21 +441,21 @@ bool build(const QByteArray &source, const QList<PageData> &pages, const QString
         // PDF requires /LastModified beside /PieceInfo.
         root.replaceKey("/LastModified", QOH::newString(stamp.toStdString()));
 
-        out = writeMemory(q);
-        return true;
+        // Stream straight into QSaveFile's temporary file through a second
+        // descriptor on it; commit() then renames it over the target.
+        FILE *out = fdopen(dup(file.handle()), "wb");
+        if (!out)
+            throw std::runtime_error("can't open the temporary file");
+        QPDFWriter writer(q);
+        writer.setOutputFile(path.toLocal8Bit().constData(), out, true);
+        writer.setObjectStreamMode(qpdf_o_generate);
+        writer.write();
     } catch (const std::exception &e) {
+        file.cancelWriting();
         error = QObject::tr("Couldn't build the PDF (%1)").arg(QString::fromLocal8Bit(e.what()));
         return false;
     }
-}
-
-bool save(const QByteArray &source, const QList<PageData> &pages, const QString &origin, const QString &path,
-          QString &error) {
-    QByteArray bytes;
-    if (!build(source, pages, origin, bytes, error))
-        return false;
-    QSaveFile file(path);
-    if (!file.open(QIODevice::WriteOnly) || file.write(bytes) != bytes.size() || !file.commit()) {
+    if (!file.commit()) {
         error = QObject::tr("Couldn't save %1: %2").arg(path, file.errorString());
         return false;
     }

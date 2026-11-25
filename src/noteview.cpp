@@ -6,7 +6,9 @@
 #include <QPointingDevice>
 #include <QQuickPaintedItem>
 #include <QQuickWindow>
+#include <QSGGeometryNode>
 #include <QSGImageNode>
+#include <QSGVertexColorMaterial>
 #include <QSGNode>
 #include <QSGRectangleNode>
 #include <QSGTexture>
@@ -19,6 +21,38 @@ namespace {
 constexpr int PalmGraceMs = 200;
 constexpr int HoverTrustMs = 1500;
 constexpr int LayerIdleMs = 15000;
+constexpr int UploadsPerFrame = 4; // 512² tiles: ~4 MB a frame keeps frames smooth.
+
+// A soft shadow as one ring of vertex-colored triangles from the sheet's edge
+// (darkest, doubling as the hairline border) out to transparent, shifted a
+// little down. It covers only the ring, not the whole page like stacked rects.
+void layoutShadow(QSGGeometry *g, const QRectF &r) {
+    const QRectF o = r.adjusted(-5, -3, 5, 7);
+    auto *v = g->vertexDataAsColoredPoint2D();
+    const QPointF in[4] = {r.topLeft(), r.topRight(), r.bottomRight(), r.bottomLeft()};
+    const QPointF out[4] = {o.topLeft(), o.topRight(), o.bottomRight(), o.bottomLeft()};
+    for (int i = 0; i < 4; ++i) {
+        v[i].set(float(in[i].x()), float(in[i].y()), 0, 0, 0, 46);  // Premultiplied black.
+        v[4 + i].set(float(out[i].x()), float(out[i].y()), 0, 0, 0, 0);
+    }
+}
+
+QSGGeometryNode *makeShadow() {
+    auto *g = new QSGGeometry(QSGGeometry::defaultAttributes_ColoredPoint2D(), 8, 24, QSGGeometry::UnsignedShortType);
+    g->setDrawingMode(QSGGeometry::DrawTriangles);
+    quint16 *idx = g->indexDataAsUShort();
+    for (int i = 0; i < 4; ++i) {
+        const quint16 a = quint16(i), b = quint16((i + 1) % 4);
+        const quint16 quad[6] = {a, b, quint16(4 + b), a, quint16(4 + b), quint16(4 + a)};
+        std::copy(quad, quad + 6, idx + i * 6);
+    }
+    auto *n = new QSGGeometryNode;
+    n->setGeometry(g);
+    n->setFlag(QSGNode::OwnsGeometry);
+    n->setMaterial(new QSGVertexColorMaterial);
+    n->setFlag(QSGNode::OwnsMaterial);
+    return n;
+}
 
 bool realMouse(const QPointerEvent *e) {
     const auto type = e->device() ? e->device()->type() : QInputDevice::DeviceType::Mouse;
@@ -167,7 +201,8 @@ void NoteView::setDocument(Document *doc) {
     m_gesture = Gesture::None;
     m_source = Source::None;
     clearLive();
-    m_renderer.setPdf(doc ? doc->sourcePdf() : QByteArray());
+    m_renderer.setPdf(doc ? doc->source() : nullptr);
+    m_lastJobs.clear();
     if (doc) {
         connect(doc, &Document::pagesChanged, this, &NoteView::syncPages);
         connect(doc, &Document::pageChanged, this, &NoteView::onPageChanged);
@@ -255,15 +290,16 @@ bool NoteView::currentPageHasInk() const {
 
 void NoteView::syncPages() {
     QList<QSizeF> sizes;
-    QSet<quint64> ids;
+    m_indexById.clear();
     if (m_doc) {
         for (const auto &p : m_doc->pages()) {
+            m_indexById.insert(p->id, sizes.size());
             sizes.append(p->size);
-            ids.insert(p->id);
         }
     }
     for (auto it = m_tiles.begin(); it != m_tiles.end();)
-        it = ids.contains(it.key()) ? std::next(it) : m_tiles.erase(it);
+        it = m_indexById.contains(it.key()) ? std::next(it) : m_tiles.erase(it);
+    ++m_pagesVersion;
     m_view.setPages(sizes);
     if (m_needsInitialZoom && width() > 0 && !sizes.isEmpty()) {
         m_needsInitialZoom = false;
@@ -298,7 +334,14 @@ void NoteView::viewMoved() {
         clearLive();
     if (!m_zooming)
         m_scheduleTimer.start();
-    emit viewChanged();
+    // QML bindings (page counter, zoom label) only re-run on real changes,
+    // not on every scrolled frame.
+    if (m_view.zoom() != m_shownZoom || currentPage() != m_shownPage || pageCount() != m_shownCount) {
+        m_shownZoom = m_view.zoom();
+        m_shownPage = currentPage();
+        m_shownCount = pageCount();
+        emit viewChanged();
+    }
 }
 
 // Blank paper only exists while you can see it: sheets at the end with no
@@ -309,10 +352,12 @@ void NoteView::trimUnusedPaper() {
     if (!m_doc || m_doc->pageCount() < 2 || m_needsInitialZoom)
         return;
     const double limit = m_view.toDoc({0, height()}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
-    int keep = 0;
-    for (int i = 0; i < m_view.pageCount(); ++i)
-        if (m_view.pageDocRect(i).top() <= limit)
-            keep = i;
+    // Walk back from the end: only the tail can be trimmed.
+    int keep = m_view.pageCount() - 1;
+    while (keep > 0 && m_view.pageDocRect(keep).top() > limit)
+        --keep;
+    if (keep == m_view.pageCount() - 1)
+        return;
     if (m_strokePage)
         keep = std::max(keep, m_doc->indexOf(m_strokePage));
     m_doc->trimPaperAfter(keep); // Re-enters via syncPages -> viewMoved; nothing left to trim then.
@@ -330,7 +375,7 @@ double NoteView::deviceRatio() const { return window() ? window()->effectiveDevi
 double NoteView::targetScale() const { return std::round(m_view.zoom() * deviceRatio() * 1e4) / 1e4; }
 
 bool NoteView::needsBackground(const Page &page) const {
-    return page.source >= 0 && !page.note && m_doc && !m_doc->sourcePdf().isEmpty();
+    return page.source >= 0 && !page.note && m_doc && m_doc->source();
 }
 
 QRectF NoteView::snapped(QRectF r) const {
@@ -364,6 +409,7 @@ void NoteView::scheduleRenders() {
     const double margin = height() * 0.5;
     QList<TileRenderer::Job> urgent, later;
     QSet<quint64> keep;
+    bool changed = false; // Anything the scene graph must show differently?
 
     for (int index : m_view.visiblePages(margin)) {
         const auto page = m_doc->page(index);
@@ -383,6 +429,7 @@ void NoteView::scheduleRenders() {
                 if (!tile) {
                     pt.tiles.append(Tile{scale, tx, ty});
                     tile = &pt.tiles.last();
+                    changed = true;
                 }
                 if (tile->revision == page->revision)
                     continue;
@@ -396,6 +443,7 @@ void NoteView::scheduleRenders() {
                     tile->revision = page->revision;
                     tile->image = QImage();
                     ++tile->serial;
+                    changed = true;
                     continue;
                 }
                 tile->requested = page->revision;
@@ -411,11 +459,12 @@ void NoteView::scheduleRenders() {
         for (const auto &t : pt.tiles)
             if (t.scale == scale && visibleRange.contains(t.tx, t.ty) && t.revision < 0)
                 covered = false;
-        pt.tiles.removeIf([&](const Tile &t) {
-            if (t.scale == scale)
-                return !wantedRange.contains(t.tx, t.ty);
-            return covered;
-        });
+        if (pt.tiles.removeIf([&](const Tile &t) {
+                if (t.scale == scale)
+                    return !wantedRange.contains(t.tx, t.ty);
+                return covered;
+            }))
+            changed = true;
     }
 
     // Pages out of reach give back their tiles and stroke outlines.
@@ -424,14 +473,25 @@ void NoteView::scheduleRenders() {
             ++it;
             continue;
         }
-        for (const auto &p : m_doc->pages())
-            if (p->id == it.key())
-                for (const auto &s : p->strokes)
-                    s->releasePath();
+        if (const auto page = m_doc->page(m_indexById.value(it.key(), -1)))
+            for (const auto &s : page->strokes)
+                s->releasePath();
         it = m_tiles.erase(it);
+        changed = true;
     }
-    m_renderer.setJobs(urgent + later);
-    update();
+    // Same wish list as last time (the usual case mid-scroll): leave the
+    // workers asleep instead of waking them to find nothing new.
+    const QList<TileRenderer::Job> jobs = urgent + later;
+    const bool sameJobs = jobs.size() == m_lastJobs.size() &&
+        std::equal(jobs.begin(), jobs.end(), m_lastJobs.begin(), [](const auto &a, const auto &b) {
+            return a.page == b.page && a.tx == b.tx && a.ty == b.ty && a.scale == b.scale && a.revision == b.revision;
+        });
+    if (!sameJobs) {
+        m_renderer.setJobs(jobs);
+        m_lastJobs = jobs;
+    }
+    if (changed)
+        update();
     maybeClearLive();
 }
 
@@ -477,6 +537,7 @@ void NoteView::onPageChanged(quint64 id, const QRectF &region) {
 
 void NoteView::resetTiles() {
     m_tiles.clear();
+    m_lastJobs.clear();
     scheduleRenders();
 }
 
@@ -507,6 +568,7 @@ void NoteView::releaseResources() {
     m_nodes.clear();
     m_pageNodes.clear();
     m_backdropNode = nullptr;
+    m_contentNode = nullptr;
     QMetaObject::invokeMethod(this, &NoteView::resetTiles, Qt::QueuedConnection);
 }
 
@@ -522,9 +584,45 @@ QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
         m_pageNodes.clear();
         m_backdropNode = window()->createRectangleNode();
         root->appendChildNode(m_backdropNode);
+        m_contentNode = new QSGTransformNode;
+        root->appendChildNode(m_contentNode);
+        ++m_layoutStamp;
     }
     m_backdropNode->setRect(boundingRect());
     m_backdropNode->setColor(m_backdrop);
+
+    // Content coordinates are the screen at zero pan and scroll; scrolling is
+    // just this one translation, snapped to device pixels.
+    const double dpr = deviceRatio();
+    const QPointF offset(std::round(m_view.panX() * dpr) / dpr, std::round(-m_view.scrollY() * dpr) / dpr);
+    QTransform shift;
+    shift.translate(offset.x(), offset.y());
+    m_contentNode->setMatrix(shift);
+    const LayoutKey key{m_view.zoom(), width(), dpr, m_pagesVersion};
+    if (key.zoom != m_layoutKey.zoom || key.width != m_layoutKey.width || key.dpr != m_layoutKey.dpr ||
+        key.pages != m_layoutKey.pages) {
+        m_layoutKey = key;
+        ++m_layoutStamp;
+    }
+
+    struct Upload { Tile *tile; NodeEntry *entry; QRectF rect; QSGNode *parent; int priority; };
+    QList<Upload> uploads;
+    auto place = [](NodeEntry &e, const QRectF &rect, QSGNode *parent, quint64 stamp) {
+        if (e.node->parent() != parent) {
+            if (e.node->parent())
+                e.node->parent()->removeChildNode(e.node);
+            parent->appendChildNode(e.node);
+        }
+        if (e.laidOut != stamp) {
+            // The source matches the visible part (rect may be clamped at the
+            // sheet's edge), so the image is never squeezed.
+            const QSizeF tex = e.node->texture()->textureSize();
+            e.node->setRect(rect);
+            e.node->setSourceRect(QRectF(0, 0, std::min(tex.width(), rect.width() * e.pxPerUnit),
+                                         std::min(tex.height(), rect.height() * e.pxPerUnit)));
+            e.laidOut = stamp;
+        }
+    };
 
     QSet<NodeKey> used;
     QSet<quint64> livePages;
@@ -532,74 +630,91 @@ QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     if (m_doc) {
         const double scale = targetScale();
         const QRectF view = boundingRect();
-        for (int index = 0; index < m_doc->pageCount(); ++index) {
+        // Only pages on screen or still holding tiles, never the whole document.
+        QList<int> indices = m_view.visiblePages(8);
+        for (auto it = m_tiles.begin(); it != m_tiles.end(); ++it) {
+            const int i = m_indexById.value(it.key(), -1);
+            if (i >= 0 && !indices.contains(i))
+                indices.append(i);
+        }
+        for (int index : indices) {
             const auto page = m_doc->page(index);
-            const QRectF r = snapped(m_view.pageScreenRect(index));
-            auto pt = m_tiles.find(page->id);
-            const bool near = r.adjusted(-8, -8, 8, 8).intersects(view);
-            if (!near && pt == m_tiles.end())
+            if (!page)
                 continue;
+            const QRectF r = snapped(m_view.pageScreenRect(index).translated(-m_view.panX(), m_view.scrollY()));
             livePages.insert(page->id);
             PageNode &pn = m_pageNodes[page->id];
             if (!pn.group) {
                 pn.group = new QSGTransformNode;
-                for (auto &rect : pn.rects) {
-                    rect = window()->createRectangleNode();
-                    pn.group->appendChildNode(rect);
-                }
+                pn.shadow = makeShadow();
+                pn.paper = window()->createRectangleNode();
+                pn.paper->setColor(Qt::white);
                 pn.standIns = new QSGTransformNode;
                 pn.current = new QSGTransformNode;
+                pn.group->appendChildNode(pn.shadow);
+                pn.group->appendChildNode(pn.paper);
                 pn.group->appendChildNode(pn.standIns);
                 pn.group->appendChildNode(pn.current);
-                root->appendChildNode(pn.group);
+                m_contentNode->appendChildNode(pn.group);
             }
-            // Soft shadow and hairline border keep white sheets distinct on any theme.
-            for (int k = 4; k >= 1; --k) {
-                pn.rects[4 - k]->setRect(r.adjusted(-k, -k + 2, k, k + 2));
-                pn.rects[4 - k]->setColor(QColor(0, 0, 0, 14 - k * 2));
+            if (pn.laidOut != m_layoutStamp) {
+                layoutShadow(pn.shadow->geometry(), r);
+                pn.shadow->markDirty(QSGNode::DirtyGeometry);
+                pn.paper->setRect(r);
+                pn.laidOut = m_layoutStamp;
             }
-            pn.rects[4]->setRect(r.adjusted(-1, -1, 1, 1));
-            pn.rects[4]->setColor(QColor(0, 0, 0, 40));
-            pn.rects[5]->setRect(r);
-            pn.rects[5]->setColor(Qt::white);
+            auto pt = m_tiles.find(page->id);
             if (pt == m_tiles.end())
                 continue;
 
             for (auto &t : pt->tiles) {
                 if (t.blank || t.revision < 0)
                     continue;
-                const NodeKey key{page->id, qint64(std::llround(t.scale * 1e4)), t.tx, t.ty};
-                NodeEntry &entry = m_nodes[key];
+                const NodeKey nodeKey{page->id, qint64(std::llround(t.scale * 1e4)), t.tx, t.ty};
+                NodeEntry &entry = m_nodes[nodeKey];
                 if (!entry.node) {
                     entry.node = window()->createImageNode();
                     entry.node->setOwnsTexture(true);
                     entry.node->setFiltering(QSGTexture::Linear);
                 }
+                const QRect px = TileRenderer::tilePixels(page->size, t.scale, t.tx, t.ty);
+                const double f = m_view.zoom() / t.scale;
+                // Edge tiles round up to whole pixels; clamp to the sheet so
+                // none pokes a hairline past the paper.
+                const QRectF rect = QRectF(r.x() + px.x() * f, r.y() + px.y() * f, px.width() * f, px.height() * f) & r;
+                QSGNode *parent = t.scale == scale ? pn.current : pn.standIns;
+                entry.pxPerUnit = 1.0 / f;
+                used.insert(nodeKey);
                 if (entry.serial != t.serial) {
                     if (t.image.isNull()) {
                         lost = true; // Shouldn't happen; re-render to be safe.
                     } else {
-                        // The node owns its texture and frees the previous one.
-                        entry.node->setTexture(window()->createTextureFromImage(t.image, QQuickWindow::TextureIsOpaque));
-                        entry.serial = t.serial;
-                        t.image = QImage(); // Uploaded: the GPU copy is the one that counts now.
+                        const bool onScreen = t.scale == scale && rect.translated(offset).intersects(view);
+                        uploads.append({&t, &entry, rect, parent, onScreen ? 0 : 1});
                     }
                 }
-                if (!entry.node->texture())
-                    continue;
-                QSGNode *parent = t.scale == scale ? pn.current : pn.standIns;
-                if (entry.node->parent() != parent) {
-                    if (entry.node->parent())
-                        entry.node->parent()->removeChildNode(entry.node);
-                    parent->appendChildNode(entry.node);
-                }
-                const QRect px = TileRenderer::tilePixels(page->size, t.scale, t.tx, t.ty);
-                const double f = m_view.zoom() / t.scale;
-                entry.node->setRect(QRectF(r.x() + px.x() * f, r.y() + px.y() * f, px.width() * f, px.height() * f));
-                entry.node->setSourceRect(QRectF(QPointF(0, 0), entry.node->texture()->textureSize()));
-                used.insert(key);
+                if (entry.node->texture())
+                    place(entry, rect, parent, m_layoutStamp); // Old texture shows until the new one lands.
             }
         }
+    }
+
+    // Uploads are spread over frames, visible tiles first, so a zoom that
+    // settles with a screenful of new tiles never stalls one frame.
+    std::stable_sort(uploads.begin(), uploads.end(),
+                     [](const Upload &a, const Upload &b) { return a.priority < b.priority; });
+    for (int i = 0; i < uploads.size(); ++i) {
+        if (i == UploadsPerFrame) {
+            QMetaObject::invokeMethod(this, [this] { update(); }, Qt::QueuedConnection);
+            break;
+        }
+        Upload &u = uploads[i];
+        // The node owns its texture and frees the previous one.
+        u.entry->node->setTexture(window()->createTextureFromImage(u.tile->image, QQuickWindow::TextureIsOpaque));
+        u.entry->serial = u.tile->serial;
+        u.tile->image = QImage(); // Uploaded: the GPU copy is the one that counts now.
+        u.entry->laidOut = 0;
+        place(*u.entry, u.rect, u.parent, m_layoutStamp);
     }
     if (lost)
         QMetaObject::invokeMethod(this, &NoteView::resetTiles, Qt::QueuedConnection);
@@ -619,8 +734,8 @@ QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
             ++it;
             continue;
         }
-        root->removeChildNode(it->group);
-        delete it->group; // Rects and the empty tile groups go with it.
+        m_contentNode->removeChildNode(it->group);
+        delete it->group; // Shadow, paper and the empty tile groups go with it.
         it = m_pageNodes.erase(it);
     }
     return root;
@@ -694,11 +809,7 @@ void NoteView::maybeClearLive() {
         return;
     const double scale = targetScale();
     for (auto it = m_pending.begin(); it != m_pending.end(); ++it) {
-        const int index = [&] {
-            for (int i = 0; i < m_doc->pageCount(); ++i)
-                if (m_doc->page(i)->id == it.key()) return i;
-            return -1;
-        }();
+        const int index = m_indexById.value(it.key(), -1);
         if (index < 0)
             continue;
         const QRect range = tileRange(index, scale, 0);
@@ -861,9 +972,15 @@ void NoteView::startFling(QPointF velocity) {
 // Every user scroll goes through here. Pushing past the end of a notebook
 // adds a fresh sheet, so there's always paper below; returns whether it did.
 bool NoteView::scrollBy(double dx, double dy) {
+    const double before = m_view.scrollY();
     m_view.panBy(dx, dy);
-    if (dy < 0 && m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 &&
-        m_doc->pages().last()->note && m_view.scrollY() >= m_view.maxScrollY() - 0.5) {
+    const bool atEnd = m_view.scrollY() >= m_view.maxScrollY() - 0.5;
+    // Only a deliberate push past the end counts, not jitter of a drag along
+    // the margin of a page that already fits on screen.
+    m_overscroll = (dy < 0 && atEnd) ? m_overscroll + (-dy - (m_view.scrollY() - before)) : 0;
+    if (m_overscroll > 48 && m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 &&
+        m_doc->pages().last()->note) {
+        m_overscroll = 0;
         m_doc->appendPaper();
         return true;
     }

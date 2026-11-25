@@ -80,9 +80,9 @@ void TileRenderer::hideInk(Poppler::Document &doc) {
     walk({});
 }
 
-void TileRenderer::setPdf(const QByteArray &pdf) {
+void TileRenderer::setPdf(const SourcePtr &source) {
     QMutexLocker lock(&m_mutex);
-    m_pdf = pdf;
+    m_pdf = source;
     m_jobs.clear();
     ++m_generation;
     QMutexLocker bg(&m_bgMutex);
@@ -144,7 +144,7 @@ void TileRenderer::storeBackground(const BgKey &key, const QImage &image) {
 void TileRenderer::run(Worker *worker) {
     for (;;) {
         Job job;
-        QByteArray pdf;
+        SourcePtr pdf;
         int generation;
         {
             QMutexLocker lock(&m_mutex);
@@ -159,7 +159,8 @@ void TileRenderer::run(Worker *worker) {
             pdf = m_pdf;
         }
         if (worker->docGeneration != generation) {
-            worker->doc = pdf.isEmpty() ? nullptr : Poppler::Document::loadFromData(pdf);
+            // Each worker opens the file itself; poppler reads pages on demand.
+            worker->doc = pdf ? Poppler::Document::load(pdf->path()) : nullptr;
             if (worker->doc) {
                 worker->doc->setRenderHint(Poppler::Document::Antialiasing);
                 worker->doc->setRenderHint(Poppler::Document::TextAntialiasing);

@@ -91,7 +91,7 @@ Document *Document::open(const QString &path, QString *error, QObject *parent) {
 
 Document *Document::fromLoaded(const QString &path, const PdfStore::Loaded &loaded, QObject *parent) {
     auto *doc = new Document(parent);
-    doc->m_source = loaded.pdf;
+    doc->m_source = loaded.source;
     doc->m_filePath = QFileInfo(path).absoluteFilePath();
     doc->m_fromOmanote = loaded.omanote;
     doc->m_external = loaded.origin != "note";

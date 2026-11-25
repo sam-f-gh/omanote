@@ -1,6 +1,10 @@
 // Omanote — minimalist PDF notes and annotation for Omarchy, pen first.
 
 #include <QCommandLineParser>
+#include <QDBusConnection>
+#include <QDBusMessage>
+#include <QDBusVariant>
+#include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
 #include <QQmlApplicationEngine>
@@ -14,8 +18,45 @@
 #include "theme.h"
 #include "translator.h"
 
+namespace {
+// The desktop's UI font ("Adwaita Sans 11") through the settings portal: one
+// D-Bus read. Older portals only have Read, which wraps the value twice.
+void applyDesktopFont(QGuiApplication &app) {
+    for (const char *method : {"ReadOne", "Read"}) {
+        QDBusMessage call = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop",
+            "/org/freedesktop/portal/desktop", "org.freedesktop.portal.Settings", method);
+        call << QString("org.gnome.desktop.interface") << QString("font-name");
+        const QDBusMessage reply = QDBusConnection::sessionBus().call(call, QDBus::Block, 300);
+        if (reply.type() != QDBusMessage::ReplyMessage || reply.arguments().isEmpty())
+            continue;
+        QVariant value = reply.arguments().first();
+        while (value.canConvert<QDBusVariant>() && value.userType() == qMetaTypeId<QDBusVariant>())
+            value = value.value<QDBusVariant>().variant();
+        const QString spec = value.toString().trimmed();
+        const int split = spec.lastIndexOf(' ');
+        bool ok = false;
+        const double size = split > 0 ? spec.mid(split + 1).toDouble(&ok) : 0;
+        if (!ok || size <= 0)
+            return;
+        QFont font(spec.left(split));
+        font.setPointSizeF(size);
+        app.setFont(font);
+        return;
+    }
+}
+}
+
 int main(int argc, char *argv[]) {
+    // Omarchy points Qt at the GTK platform theme, which loads all of GTK
+    // (~28 ms of startup plus its memory) only to learn the UI font. The
+    // portal theme gives the same light/dark hints without GTK, and the font
+    // is one D-Bus read below.
+    const bool gtkTheme = qgetenv("QT_QPA_PLATFORMTHEME") == "gtk3";
+    if (gtkTheme)
+        qputenv("QT_QPA_PLATFORMTHEME", "xdgdesktopportal");
     QGuiApplication app(argc, argv);
+    if (gtkTheme)
+        applyDesktopFont(app);
     app.setApplicationName("omanote");
     app.setApplicationVersion("0.1.0");
 
