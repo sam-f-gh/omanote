@@ -187,6 +187,23 @@ private slots:
         QCOMPARE(doc->saveRange(), std::make_pair(0, 0)); // Trimmed on save.
     }
 
+    void unusedPaperIsTrimmedFromTheEnd() {
+        std::unique_ptr<Document> doc(Document::createNote());
+        for (int i = 0; i < 4; ++i)
+            doc->appendPaper();
+        doc->addStroke(doc->page(2), line({10, 10}, {50, 50})); // Ink on sheet 3.
+        // Sheets 4..5 (plus the trailing one) are blank paper at the end.
+        QVERIFY(doc->trimPaperAfter(0));
+        QCOMPARE(doc->pageCount(), 3);       // Stops at the inked sheet.
+        QVERIFY(doc->page(2)->hasInk());
+        QVERIFY(!doc->trimPaperAfter(0));    // Blank sheets before ink stay.
+        std::unique_ptr<Document> fresh(Document::createNote());
+        fresh->appendPaper();
+        QVERIFY(fresh->trimPaperAfter(0));
+        QCOMPARE(fresh->pageCount(), 1);     // Never below one page.
+        QVERIFY(!fresh->trimPaperAfter(0));
+    }
+
     // --- Trimming ---------------------------------------------------------
     void trimsLeadingAndTrailingBlanks() {
         QTemporaryDir dir;

@@ -94,6 +94,10 @@ public:
     // Fresh paper at the end, outside undo history (like the trailing sheet):
     // scrolling past the end of a notebook keeps finding paper.
     void appendPaper();
+    // Drops blank sheets of paper after `index`, from the end backwards,
+    // stopping at the first page with ink (or an original PDF page).
+    // Outside undo history; returns whether any went.
+    bool trimPaperAfter(int index);
     Q_INVOKABLE void undo();
     Q_INVOKABLE void redo();
 

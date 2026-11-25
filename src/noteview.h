@@ -128,6 +128,7 @@ private:
 
     void syncPages();
     void viewMoved();
+    void trimUnusedPaper();
     void zoomTo(double zoom, QPointF focus);
     void scheduleRenders();
     void onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation);

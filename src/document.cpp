@@ -273,6 +273,18 @@ void Document::appendPaper() {
     emit pagesChanged();
 }
 
+bool Document::trimPaperAfter(int index) {
+    bool trimmed = false;
+    while (m_pages.size() > 1 && m_pages.size() - 1 > std::max(0, index) && m_pages.last()->note &&
+           !m_pages.last()->hasInk()) {
+        m_pages.removeLast();
+        trimmed = true;
+    }
+    if (trimmed)
+        emit pagesChanged();
+    return trimmed;
+}
+
 void Document::undo() {
     endErase();
     if (!canUndo())

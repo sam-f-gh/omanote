@@ -290,6 +290,7 @@ void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeomet
 }
 
 void NoteView::viewMoved() {
+    trimUnusedPaper();
     update();
     // Ink waiting on tiles was drawn for the old view; it's a few ms from
     // landing in the tiles, so just drop it rather than redraw it.
@@ -298,6 +299,23 @@ void NoteView::viewMoved() {
     if (!m_zooming)
         m_scheduleTimer.start();
     emit viewChanged();
+}
+
+// Blank paper only exists while you can see it: sheets at the end with no
+// ink are dropped once scrolled out of view below, so they never count as
+// pages (and a save never writes them). A sheet must sit a gap and a margin
+// past the bottom edge first, so removing it can't nudge the view.
+void NoteView::trimUnusedPaper() {
+    if (!m_doc || m_doc->pageCount() < 2 || m_needsInitialZoom)
+        return;
+    const double limit = m_view.toDoc({0, height()}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
+    int keep = 0;
+    for (int i = 0; i < m_view.pageCount(); ++i)
+        if (m_view.pageDocRect(i).top() <= limit)
+            keep = i;
+    if (m_strokePage)
+        keep = std::max(keep, m_doc->indexOf(m_strokePage));
+    m_doc->trimPaperAfter(keep); // Re-enters via syncPages -> viewMoved; nothing left to trim then.
 }
 
 void NoteView::itemChange(ItemChange change, const ItemChangeData &value) {

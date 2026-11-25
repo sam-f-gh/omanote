@@ -50,7 +50,8 @@ Touches are ignored while the pen is near or down, and for 200 ms after.
 Finger, touchpad and pen-in-the-margin swipes carry on with momentum when
 lifted. You can scroll up to a whole page above the first page (to write
 low on the screen), and scrolling past the end of a notebook keeps adding
-fresh paper; unused sheets are trimmed when saving.
+fresh paper. Blank sheets at the end only exist while in view: scroll back
+up and they're gone from the page count, and they're never saved.
 
 ## Build
 
