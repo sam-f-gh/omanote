@@ -425,7 +425,8 @@ private slots:
         v.zoomAt(1.0, {900, 400});
         QCOMPARE(v.panX(), 0.0);
         v.panBy(0, 100000);
-        QCOMPARE(v.scrollY(), 0.0);
+        QCOMPARE(v.scrollY(), -800 * Viewport::TopSlack); // Room above page one.
+        QVERIFY(v.toScreen(v.pageDocRect(0).topLeft()).y() > 400);
         v.panBy(0, -100000);
         QCOMPARE(v.scrollY(), v.maxScrollY());
         QCOMPARE(v.zoom(), 1.0);

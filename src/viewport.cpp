@@ -124,5 +124,5 @@ void Viewport::clamp() {
         m_panX = 0;
     else
         m_panX = std::clamp(m_panX, -maxPanX(), maxPanX());
-    m_scrollY = std::clamp(m_scrollY, 0.0, maxScrollY());
+    m_scrollY = std::clamp(m_scrollY, minScrollY(), maxScrollY());
 }
