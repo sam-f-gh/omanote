@@ -11,6 +11,8 @@ Rectangle {
     signal saveRequested()
 
     readonly property bool narrow: width < 760
+    // Very narrow tiles drop the page counter and slim the tool buttons.
+    readonly property bool tight: width < 560
     implicitHeight: 52
     color: theme.surface
 
@@ -49,7 +51,7 @@ Rectangle {
     Rectangle {
         id: tools
         readonly property real ideal: (bar.width - width) / 2
-        x: Math.max(Math.min(ideal, right.x - width - 12), bar.narrow ? 56 : 160)
+        x: Math.max(Math.min(ideal, right.x - width - (bar.tight ? 4 : 12)), bar.tight ? 46 : bar.narrow ? 56 : 160)
         anchors.verticalCenter: parent.verticalCenter
         width: toolRow.width + 8
         height: 44
@@ -68,7 +70,7 @@ Rectangle {
                 IconButton {
                     required property var modelData
                     required property int index
-                    width: 44; height: 36
+                    width: bar.tight ? 36 : 44; height: 36
                     glyph: modelData.glyph
                     tip: modelData.tip
                     active: backend.tool === index
@@ -92,7 +94,7 @@ Rectangle {
             enabled: backend.document && backend.document.canRedo
             onClicked: backend.document.redo()
         }
-        Rectangle { width: 1; height: 24; color: Qt.alpha(theme.foreground, 0.12); Layout.leftMargin: 4; Layout.rightMargin: 4 }
+        Rectangle { visible: !bar.tight; width: 1; height: 24; color: Qt.alpha(theme.foreground, 0.12); Layout.leftMargin: 4; Layout.rightMargin: 4 }
         IconButton {
             glyph: "up"; tip: qsTr("Previous page (PageUp)")
             visible: !bar.narrow
@@ -100,6 +102,7 @@ Rectangle {
             onClicked: bar.view.previousPage()
         }
         Label {
+            visible: !bar.tight
             text: bar.view ? qsTr("%1 / %2").arg((bar.view.currentPage + 1).toLocaleString(Qt.locale(), 'f', 0))
                                              .arg(bar.view.pageCount.toLocaleString(Qt.locale(), 'f', 0)) : ""
             color: theme.foreground
