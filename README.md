@@ -1,92 +1,81 @@
 # Omanote
 
-![Omanote](docs/screenshot.png)
+Handwritten notes and PDF annotation for [Omarchy](https://omarchy.org), built for
+2-in-1 touchscreens with a pen and just as quick with a mouse and keyboard.
 
-Minimalist handwritten notes and PDF annotation for Omarchy, built for 2-in-1
-touchscreens with a pen and just as fast with mouse and keyboard.
+![Writing a note in Omanote](docs/notes.png)
 
-- **New Note** — endless white paper. Write on the last page and a fresh one
-  appears below. Saving keeps the first through the last page with ink.
-- **Open PDF** — write over any PDF without flattening it: text stays
-  selectable, vectors stay vectors. `Ctrl+S` saves in place; `Ctrl+Shift+S`
-  saves a copy.
-- **Re-edit forever** — ink is saved twice: as a vector layer ("Omanote Ink")
-  any viewer shows, and as stroke data Omanote reads back, so old strokes stay
-  erasable and re-saving never stacks ghost copies.
+## Features
 
-Pressure-sensitive pen, multiply highlighter, whole-stroke eraser (pen's
-eraser end or barrel button too), palm rejection, one-finger scroll,
-two-finger pinch zoom. Follows the Omarchy theme, Hyprland rounding and
-language live.
+- **Endless notebooks.** Fresh paper appears as you write or scroll past the
+  end. Blank sheets you scroll away from disappear, and empty paper before or
+  after your writing is never saved.
+- **Annotate any PDF without altering it.** Ink goes on its own layer; the
+  original text, vectors and links stay untouched and selectable.
+- **Re-edit anytime.** Strokes are stored inside the PDF, so a reopened file
+  brings every stroke back as erasable ink, and re-saving never stacks
+  duplicate copies. Other PDF viewers show the ink as ordinary vector graphics.
+- **Pen first.** Pressure-sensitive pen, a highlighter that keeps text
+  readable, a whole-stroke eraser on the pen's eraser end or barrel button,
+  palm rejection, one-finger scroll, two-finger pinch zoom, and momentum
+  scrolling on touch, touchpad and pen.
+- **At home on Omarchy.** Follows the theme, window rounding and language
+  live, and uses the desktop's own file dialogs.
+- **Light on resources.** GPU-tiled pages, constant-cost live ink, PDFs read
+  from disk rather than held in memory, and no background work when idle.
 
-## Shortcuts
+![Annotating a PDF](docs/pdf.png)
+
+## Install
+
+On Omarchy or Arch Linux:
+
+```sh
+git clone https://github.com/sam-f-gh/omanote
+cd omanote
+bin/install    # builds and installs the package; Omanote appears in the launcher
+```
+
+Needs `qt6-base qt6-declarative qt6-wayland poppler-qt6 qpdf xdg-desktop-portal`.
+Open a file directly with `omanote file.pdf`.
+
+## Usage
 
 | Keys | Action |
 |---|---|
-| `P` / `H` / `E` | Pen / Highlighter / Eraser |
-| `Ctrl+Z` | Undo |
-| `Ctrl+Shift+Z` / `Ctrl+Y` | Redo |
-| `Ctrl+S` | Save (asks where only for a never-saved note) |
-| `Ctrl+Shift+S` | Save As |
-| `Ctrl+O` / `Ctrl+N` | Open PDF / New Note |
-| `PageDown` / `N`, `PageUp` / `B` | Next / previous page |
-| `+` / `=` | Add blank page after the current one |
-| `Ctrl+Wheel`, `Ctrl++` / `Ctrl+-`, `Ctrl+0` | Zoom, fit width |
-| `Esc` | Close document |
-| `?` | Shortcuts overlay |
-| `Q` / `Ctrl+Q` | Quit |
+| `P` `H` `E` | Pen, highlighter, eraser |
+| `Ctrl+Z`, `Ctrl+Shift+Z` | Undo, redo |
+| `Ctrl+S`, `Ctrl+Shift+S` | Save in place, save as |
+| `Ctrl+N`, `Ctrl+O` | New note, open PDF |
+| `PageDown`, `PageUp` | Next, previous page |
+| `+` | Insert a blank page |
+| `Ctrl+Wheel`, `Ctrl+0` | Zoom, fit width |
+| `Esc`, `Q` | Close document, quit |
+| `?` | All shortcuts |
 
-## Input
+The pen writes, and its eraser end or barrel button erases; in the margins it
+scrolls. Fingers only scroll and zoom, and are ignored while the pen is near
+the screen. A mouse draws with the left button and pans with the middle one.
 
-| Input | On a page | In the margins |
-|---|---|---|
-| Pen tip | Draws or erases | Scrolls |
-| Pen eraser end / barrel button | Erases (even mid-stroke) | Scrolls |
-| One finger | Scrolls | Scrolls |
-| Two fingers | Pinch zoom + pan | Same |
-| Mouse | Left draws, middle pans, wheel scrolls | Left or middle pans |
-
-Touches are ignored while the pen is near or down, and for 200 ms after.
-Finger, touchpad and pen-in-the-margin swipes carry on with momentum when
-lifted. You can scroll up to a whole page above the first page (to write
-low on the screen), and scrolling past the end of a notebook keeps adding
-fresh paper. Blank sheets at the end only exist while in view: scroll back
-up and they're gone from the page count, and they're never saved.
-
-## Build
-
-Needs `qt6-base qt6-declarative qt6-svg poppler-qt6 qpdf`.
+## Development
 
 ```sh
-bin/build                 # build/omanote
-build/omanote file.pdf    # open a PDF directly
-bin/test                  # tests, offscreen
-bin/install               # makepkg -fsi, adds it to the launcher
+bin/build      # build/omanote
+bin/test       # tests, run offscreen
 ```
 
-## Layout
+C++17 and Qt 6 Quick, built with `qmake6`. Rendering uses poppler; reading and
+writing PDFs uses qpdf.
 
-`src/ink` stroke geometry (one outline for screen and PDF), `src/document`
-pages and bounded undo, `src/pdfstore` qpdf load/strip/save, `src/viewport`
-pan and zoom math, `src/tilerenderer` worker-thread tiles (poppler + ink),
-`src/noteview` the GPU canvas, live-ink overlay and input, `src/backend`
-async open/save, QML for the chrome.
+| Source | Role |
+|---|---|
+| `src/ink` | Stroke geometry, one outline shared by screen and PDF |
+| `src/document` | Pages, undo history, save snapshots |
+| `src/pdfstore` | Loading, ink-layer stripping and atomic saves via qpdf |
+| `src/tilerenderer` | Worker threads that render page tiles |
+| `src/noteview` | GPU canvas, live ink and input handling |
+| `src/*.qml` | Interface |
 
-## Performance notes
+## License
 
-- Pages are 512 px tiles uploaded once as GPU textures: scrolling and pinch
-  are pure transforms. Ink edits re-render only the tiles they touch, off
-  the GUI thread; CPU copies are dropped after upload.
-- The stroke being drawn costs the same per sample however long it gets.
-- PDFs are read straight from disk, never held in RAM: an open handle pins
-  the file (safe across save-in-place), qpdf and poppler read on demand, and
-  saves stream into a temp file that's renamed into place. Opening never
-  rewrites the PDF (old ink is hidden via its layer); open and save run on
-  workers. Stroke data is varint-coded (format 2; format 1 loads).
-- Scrolling moves one transform node; nodes are re-laid out only on zoom or
-  resize, tile uploads are spread over frames, page shadows are one ring.
-- Idle means idle: no polling (theme via file watches, rounding via
-  Hyprland's event socket, fling per presented frame), and after a rest the
-  live-ink layer, PDF tile cache and parsed PDFs are released.
-- The GTK platform theme Omarchy sets isn't loaded (~28 ms, ~17 MB); the UI
-  font comes from the settings portal instead.
+[MIT](LICENSE)
