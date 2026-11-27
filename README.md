@@ -36,7 +36,7 @@ cd omanote
 bin/install    # builds and installs the package; Omanote appears in the launcher
 ```
 
-Needs `qt6-base qt6-declarative qt6-wayland poppler-qt6 qpdf xdg-desktop-portal`.
+Needs `qt6-base qt6-declarative poppler-qt6 qpdf xdg-desktop-portal`.
 Open a file directly with `omanote file.pdf`.
 
 ## Usage

@@ -7,6 +7,6 @@ Exec=omanote %f
 Icon=omanote
 Terminal=false
 MimeType=application/pdf;
-Categories=Office;Graphics;Viewer;
+Categories=Office;Viewer;
 Keywords=notes;pdf;annotate;pen;stylus;handwriting;
 StartupWMClass=omanote

@@ -7,6 +7,9 @@ PKGCONFIG += poppler-qt6 wayland-client
 QMAKE_CXXFLAGS += $$system(pkg-config --cflags libqpdf)
 LIBS += $$system(pkg-config --libs libqpdf)
 TARGET = omanote
+VERSION = 0.1.0
+# The one place the version lives; main.cpp reports it for --version.
+DEFINES += OMANOTE_VERSION=\\\"$$VERSION\\\"
 TEMPLATE = app
 
 HEADERS += \

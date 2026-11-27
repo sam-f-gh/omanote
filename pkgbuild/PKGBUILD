@@ -1,17 +1,26 @@
+# Local build of the working tree for bin/install. The released package's
+# recipe lives in omacom/omarchy-pkgs and builds from the tagged tarball.
 pkgname=omanote
-pkgver=0.1.0
+pkgver=$(sed -n 's/^VERSION = //p' "$startdir/../omanote.pro")
 pkgrel=1
 pkgdesc='Minimalist PDF notes and annotation for pen, touch and keyboard'
 arch=('x86_64' 'aarch64')
+url='https://github.com/sam-f-gh/omanote'
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'wayland' 'poppler-qt6' 'qpdf' 'xdg-desktop-portal')
-makedepends=('gcc' 'make' 'wayland-protocols')
-source=()
-sha256sums=()
+options=('!debug')
+depends=('hicolor-icon-theme' 'poppler-qt6' 'qpdf' 'qt6-base' 'qt6-declarative' 'wayland' 'xdg-desktop-portal')
+makedepends=('gcc' 'make' 'pkgconf' 'wayland-protocols')
+# The PDF round-trip test writes text and reads it back, which needs a font.
+checkdepends=('ttf-liberation')
 
 build() {
   cd "$startdir/.."
   ./bin/build
+}
+
+check() {
+  cd "$startdir/.."
+  ./bin/test
 }
 
 package() {

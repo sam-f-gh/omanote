@@ -67,7 +67,7 @@ int main(int argc, char *argv[]) {
     QGuiApplication app(argc, argv);
     applyOmarchyFont(app, gtkTheme ? desktopFontSize() : 0);
     app.setApplicationName("omanote");
-    app.setApplicationVersion("0.1.0");
+    app.setApplicationVersion(QStringLiteral(OMANOTE_VERSION));
 
     // Matches the window to omanote.desktop, so the compositor (Wayland
     // app_id) and the launcher pick up the installed icon.
