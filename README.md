@@ -20,7 +20,8 @@ Handwritten notes and PDF annotation for [Omarchy](https://omarchy.org), built f
   palm rejection, one-finger scroll, two-finger pinch zoom, and momentum
   scrolling on touch, touchpad and pen.
 - **At home on Omarchy.** Follows the theme, window rounding and language
-  live, and uses the desktop's own file dialogs.
+  live, and uses the desktop's own file dialogs. Elsewhere on Arch it runs
+  with a dark look and Omarchy's yellow.
 - **Light on resources.** GPU-tiled pages, constant-cost live ink, PDFs read
   from disk rather than held in memory, and no background work when idle.
 
@@ -28,15 +29,21 @@ Handwritten notes and PDF annotation for [Omarchy](https://omarchy.org), built f
 
 ## Install
 
-On Omarchy or Arch Linux:
+On Omarchy or Arch Linux, until Omanote is in Omarchy's package repository,
+build and install it from source:
 
 ```sh
 git clone https://github.com/sam-f-gh/omanote
 cd omanote
-bin/install    # builds and installs the package; Omanote appears in the launcher
+bin/install    # builds, tests and installs the package; Omanote appears in the launcher
 ```
 
-Needs `qt6-base qt6-declarative poppler-qt6 qpdf xdg-desktop-portal`.
+`bin/install` pulls in what it needs: `qt6-base qt6-declarative poppler-qt6
+qpdf xdg-desktop-portal` to run, `wayland-protocols` to build, and a font for
+the tests. Open and save dialogs come from the desktop's portal; Omarchy, GNOME
+and KDE have one, and on a desktop without a file chooser (sway, i3) install
+`xdg-desktop-portal-gtk`.
+
 Open a file directly with `omanote file.pdf`.
 
 ## Usage
@@ -44,12 +51,12 @@ Open a file directly with `omanote file.pdf`.
 | Keys | Action |
 |---|---|
 | `P` `H` `E` | Pen, highlighter, eraser |
-| `Ctrl+Z`, `Ctrl+Shift+Z` | Undo, redo |
+| `Ctrl+Z`, `Ctrl+Shift+Z` or `Ctrl+Y` | Undo, redo |
 | `Ctrl+S`, `Ctrl+Shift+S` | Save in place, save as |
 | `Ctrl+N`, `Ctrl+O` | New note, open PDF |
-| `PageDown`, `PageUp` | Next, previous page |
+| `PageDown` or `N`, `PageUp` or `B` | Next, previous page |
 | `+` | Insert a blank page |
-| `Ctrl+Wheel`, `Ctrl+0` | Zoom, fit width |
+| `Ctrl+Wheel` or `Ctrl+±`, `Ctrl+0` | Zoom, fit width |
 | `Esc`, `Q` | Close document, quit |
 | `?` | All shortcuts |
 
@@ -62,10 +69,12 @@ the screen. A mouse draws with the left button and pans with the middle one.
 ```sh
 bin/build      # build/omanote
 bin/test       # tests, run offscreen
+omarchy agent look app -- ./build/omanote file.pdf    # screenshot it offscreen
 ```
 
 C++20 and Qt 6 Quick, built with `qmake6`. Rendering uses poppler; reading and
-writing PDFs uses qpdf.
+writing PDFs uses qpdf. The version lives in `omanote.pro`; bump it before
+tagging a release. CI builds and tests every push on Arch.
 
 | Source | Role |
 |---|---|
@@ -74,6 +83,8 @@ writing PDFs uses qpdf.
 | `src/pdfstore` | Loading, ink-layer stripping and atomic saves via qpdf |
 | `src/tilerenderer` | Worker threads that render page tiles |
 | `src/noteview` | GPU canvas, live ink and input handling |
+| `src/theme`, `src/translator` | Following Omarchy's theme, rounding and language |
+| `src/portalfilepicker` | Open and save dialogs through xdg-desktop-portal |
 | `src/*.qml` | Interface |
 
 ## License
