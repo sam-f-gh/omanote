@@ -5,6 +5,10 @@
 #include <QJsonObject>
 #include <QPainter>
 #include <QPdfWriter>
+#include <QQmlComponent>
+#include <QQmlContext>
+#include <QQmlEngine>
+#include <QQuickItem>
 #include <QTemporaryDir>
 #include <QtTest>
 #include <poppler-qt6.h>
@@ -549,6 +553,41 @@ private slots:
         QTRY_COMPARE(spy.size(), 3);
         QVERIFY(!spy[2].at(5).value<QImage>().isNull());
         QVERIFY(renderer.cachedBytes() > 0);
+    }
+
+    void popupsBuildTheirContentOnlyWhenOpened() {
+        // The help overlay and the color grid start empty, fill in on open,
+        // and load without a single QML warning.
+        QTemporaryDir dir;
+        Theme theme(dir.path());
+        QQmlEngine engine;
+        QStringList warnings;
+        connect(&engine, &QQmlEngine::warnings, this, [&](const QList<QQmlError> &list) {
+            for (const auto &e : list) warnings << e.toString();
+        });
+        engine.rootContext()->setContextProperty("theme", &theme);
+        QQmlComponent component(&engine);
+        component.setData("import QtQuick\nimport QtQuick.Controls\n"
+                          "ApplicationWindow { width: 800; height: 600; visible: true\n"
+                          "  HelpOverlay { objectName: 'help' }\n  ColorGrid { objectName: 'grid' } }",
+                          QUrl::fromLocalFile(QStringLiteral(SRCDIR "/")));
+        std::unique_ptr<QObject> root(component.create());
+        QVERIFY2(root, qPrintable(component.errorString()));
+        for (const char *name : {"help", "grid"}) {
+            QObject *popup = root->findChild<QObject *>(name);
+            QVERIFY(popup);
+            auto *loader = popup->property("contentItem").value<QQuickItem *>();
+            QVERIFY(loader);
+            QVERIFY(!loader->property("item").value<QObject *>());
+            QMetaObject::invokeMethod(popup, "open");
+            QTRY_VERIFY(loader->property("item").value<QObject *>());
+            QTRY_VERIFY(popup->property("opened").toBool());
+            QVERIFY(popup->property("width").toDouble() > 200);
+            QVERIFY(popup->property("height").toDouble() > 100);
+            QMetaObject::invokeMethod(popup, "close");
+            QTRY_VERIFY(!popup->property("visible").toBool());
+        }
+        QVERIFY2(warnings.isEmpty(), qPrintable(warnings.join('\n')));
     }
 
     // --- Viewport ----------------------------------------------------------

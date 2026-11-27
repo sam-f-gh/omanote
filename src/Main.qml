@@ -86,10 +86,13 @@ ApplicationWindow {
         LayoutMirroring.enabled: Qt.application.layoutDirection === Qt.RightToLeft
         LayoutMirroring.childrenInherit: true
 
-        StartScreen {
+        // Only one of the start screen and the workspace exists at a time.
+        Loader {
             anchors.fill: parent
-            visible: !backend.hasDocument
-            onHelpRequested: help.open()
+            active: !backend.hasDocument
+            sourceComponent: StartScreen {
+                onHelpRequested: help.open()
+            }
         }
 
         Loader {
