@@ -114,6 +114,48 @@ private slots:
         QCOMPARE(simple.size(), 2);
     }
 
+    void straightStrokesStayLight() {
+        // A simplified straight line is two samples far apart: two end caps
+        // and one body (31 path elements), not a dozen spline steps (86).
+        Stroke s;
+        s.samples = {{0, 0, .5f}, {300, 0, .5f}};
+        const QPainterPath path = Ink::outline(s);
+        QVERIFY2(path.elementCount() <= 31, qPrintable(QString::number(path.elementCount())));
+        QVERIFY(path.contains(QPointF(150, 1)));
+        QVERIFY(!path.contains(QPointF(150, 2)));
+        QVERIFY(Ink::hits(s, {150, 6}, {150, 6}));
+        QVERIFY(!Ink::hits(s, {150, 7}, {150, 7}));
+    }
+
+    void curvedStrokesFollowTheSpline() {
+        // Sparse samples on a circle: the outline must hug the Catmull-Rom
+        // curve through them, just inside its edge, all the way round.
+        Stroke s;
+        for (int i = 0; i <= 12; ++i) {
+            const double a = i * M_PI / 12;
+            s.samples.append({float(100 + 80 * std::cos(a)), float(100 + 80 * std::sin(a)), .5f});
+        }
+        const QPainterPath path = Ink::outline(s);
+        auto spline = [&](int i, double t) {
+            const int n = s.samples.size();
+            const QPointF p0 = s.point(std::max(0, i - 1)), p1 = s.point(i), p2 = s.point(i + 1),
+                          p3 = s.point(std::min(n - 1, i + 2));
+            const double t2 = t * t, t3 = t2 * t;
+            return 0.5 * ((2 * p1) + (-p0 + p2) * t + (2 * p0 - 5 * p1 + 4 * p2 - p3) * t2 +
+                          (-p0 + 3 * p1 - 3 * p2 + p3) * t3);
+        };
+        const double r = s.radius(0), inset = 0.06;
+        for (int i = 0; i + 1 < s.samples.size(); ++i)
+            for (int k = 1; k < 20; ++k) {
+                const double t = k / 20.0;
+                const QPointF p = spline(i, t), d = spline(i, t + 1e-4) - spline(i, t - 1e-4);
+                const QPointF normal = QPointF(-d.y(), d.x()) / std::hypot(d.x(), d.y());
+                QVERIFY(path.contains(p + normal * (r - inset)));
+                QVERIFY(path.contains(p - normal * (r - inset)));
+                QVERIFY(!path.contains(p + normal * (r + inset)));
+            }
+    }
+
     void strokeJsonRoundTrip() {
         auto s = line({1.234, 5.678}, {50, 60}, Tool::Highlighter, 0.7f);
         s->color = QColor("#ffd60a");

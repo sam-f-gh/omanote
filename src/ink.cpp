@@ -88,10 +88,12 @@ Body addCapsuleBody(QPainterPath &path, const Node &n0, const Node &n1) {
     const double len = std::hypot(d.x(), d.y());
     if (len <= std::abs(n0.r - n1.r) + 1e-6)
         return {}; // One circle contains the other.
-    const double theta = std::atan2(d.y(), d.x());
-    const double alpha = std::acos(std::clamp((n0.r - n1.r) / len, -1.0, 1.0));
-    const QPointF u1(std::cos(theta + alpha), std::sin(theta + alpha));
-    const QPointF u2(std::cos(theta - alpha), std::sin(theta - alpha));
+    // The tangent normals are the direction rotated by ±alpha, where
+    // cos(alpha) = (r0 - r1) / len; rotating by hand avoids four trig calls.
+    const double ux = d.x() / len, uy = d.y() / len;
+    const double c = std::clamp((n0.r - n1.r) / len, -1.0, 1.0), sn = std::sqrt(1 - c * c);
+    const QPointF u1(ux * c - uy * sn, uy * c + ux * sn);
+    const QPointF u2(ux * c + uy * sn, uy * c - ux * sn);
     Body body{true, n0.pt + u1 * n0.r, n1.pt + u1 * n1.r, n0.pt + u2 * n0.r, n1.pt + u2 * n1.r};
     addPolygon(path, {body.a1, body.b1, body.b2, body.a2});
     return body;
@@ -111,6 +113,10 @@ QByteArray num(double v) {
     return s == "-0" ? "0" : s;
 }
 
+// Points (page units) the densified spline may stray from the true curve:
+// under half a device pixel at the deepest zoom on a 2x screen.
+constexpr double Flatness = 0.03;
+
 // The spline the outline follows, densified so curves read smooth at any
 // zoom. Hit testing walks the same nodes, so the eraser touches exactly what
 // is drawn even where fast strokes curve far from their raw samples.
@@ -124,8 +130,21 @@ QVector<Node> densify(const Stroke &stroke) {
         const QPointF p0 = stroke.point(std::max(0, i - 1)), p1 = stroke.point(i), p2 = stroke.point(i + 1),
                       p3 = stroke.point(std::min(n - 1, i + 2));
         const double r1 = stroke.radius(i), r2 = stroke.radius(i + 1);
+        // As many steps as the curve needs to stay within Flatness of the
+        // spline, and never more than one per 1.5 pt. The segment is a cubic
+        // Bézier (p1, b1, b2, p2), and n chords stray from it by about
+        // 3/4 · |second difference| / n². Only the part across the chord
+        // shows (speeding up along it doesn't), so a straight span is one step.
+        const QPointF b1 = p1 + (p2 - p0) / 6, b2 = p2 - (p3 - p1) / 6;
+        const QPointF d1 = p1 - 2 * b1 + b2, d2 = b1 - 2 * b2 + p2;
         const double len = QLineF(p1, p2).length();
-        const int steps = std::clamp(int(std::ceil(len / 1.5)), 1, 12);
+        auto across = [&](QPointF d) {
+            return len > 1e-9 ? std::abs(d.x() * (p2.y() - p1.y()) - d.y() * (p2.x() - p1.x())) / len
+                              : std::hypot(d.x(), d.y());
+        };
+        const double bend = std::max(across(d1), across(d2));
+        const int curved = int(std::ceil(std::sqrt(0.75 * bend / Flatness)));
+        const int steps = std::clamp(std::min(curved, int(std::ceil(len / 1.5))), 1, 12);
         for (int s = 0; s < steps; ++s) {
             const double t = double(s) / steps;
             nodes.append({s == 0 ? p1 : catmull(p0, p1, p2, p3, t), r1 + (r2 - r1) * t, s == 0});
