@@ -387,7 +387,9 @@ void NoteView::viewMoved() {
 void NoteView::trimUnusedPaper() {
     if (!m_doc || m_doc->pageCount() < 2 || m_needsInitialZoom)
         return;
-    const double limit = m_view.toDoc({0, height()}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
+    // A sheet goes once its top is more than the paper zone below the view
+    // (plus the gap and margin), well out of sight.
+    const double limit = m_view.toDoc({0, height() + paperZone()}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
     // Walk back from the end: only the tail can be trimmed.
     int keep = m_view.pageCount() - 1;
     while (keep > 0 && m_view.pageDocRect(keep).top() > limit)
@@ -1013,20 +1015,36 @@ void NoteView::startFling(QPointF velocity) {
 // Every user scroll goes through here. Pushing past the end of a notebook
 // adds a fresh sheet, so there's always paper below; returns whether it did.
 bool NoteView::scrollBy(double dx, double dy) {
-    const double before = m_view.scrollY();
     m_view.panBy(dx, dy);
-    const bool atEnd = m_view.scrollY() >= m_view.maxScrollY() - 0.5;
-    // Only a deliberate push past the end counts, not jitter of a drag along
-    // the margin of a page that already fits on screen.
-    m_overscroll = (dy < 0 && atEnd) ? m_overscroll + (-dy - (m_view.scrollY() - before)) : 0;
-    if (m_overscroll > 48 && m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 &&
-        m_doc->pages().last()->note) {
-        m_overscroll = 0;
-        m_doc->appendPaper();
-        return true;
+    if (dy >= 0 || !canGrowPaper()) {
+        m_downPush = 0;
+        return false;
     }
-    return false;
+    // Paper is added ahead of the end, while there's still room to scroll,
+    // so scrolling down never meets a wall. It takes a little steady
+    // downward motion near the end (jitter along the margin flips direction
+    // and resets it), so a page that fits on screen doesn't sprout paper by
+    // accident.
+    if (m_view.maxScrollY() - m_view.scrollY() > paperZone()) {
+        m_downPush = 0;
+        return false;
+    }
+    m_downPush += -dy;
+    if (m_downPush < 24)
+        return false;
+    m_downPush = 0;
+    m_doc->appendPaper();
+    return true;
 }
+
+bool NoteView::canGrowPaper() const {
+    return m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 && m_doc->pages().last()->note;
+}
+
+// How close to the end (in pixels of scroll left) fresh paper is added, and
+// how far below the view blank paper may sit before it's dropped again. One
+// number for both, so a sheet just added is never trimmed straight back.
+double NoteView::paperZone() const { return height() * 0.5; }
 
 // --- Input ------------------------------------------------------------------
 
@@ -1318,8 +1336,10 @@ void NoteView::flingFrame() {
     const bool grew = scrollBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
     // Same decay per millisecond whatever the refresh rate.
     m_flingVelocity *= std::pow(0.94, dt / 16.0);
-    // A fling into the end of a notebook rolls on into the fresh sheet.
-    if (length(m_flingVelocity) < 0.02 || (!grew && y == m_view.scrollY() && x == m_view.panX()))
+    // A fling into the end of a notebook rolls on into fresh paper; one that
+    // meets any other edge stops there.
+    const bool stuck = !grew && y == m_view.scrollY() && x == m_view.panX();
+    if (length(m_flingVelocity) < 0.02 || (stuck && !(m_flingVelocity.y() < 0 && canGrowPaper())))
         m_flinging = false;
     viewMoved();
 }

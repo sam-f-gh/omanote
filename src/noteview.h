@@ -122,6 +122,8 @@ private:
     void stopFling() { m_flinging = false; }
     void startFling(QPointF velocity);
     bool scrollBy(double dx, double dy);
+    bool canGrowPaper() const;
+    double paperZone() const;
     void flingFrame();
     bool touchBlocked() const;
     void setHover(QPointF pos, bool visible);
@@ -195,7 +197,7 @@ private:
     // Touchpad scrolling keeps its own velocity, flung on lift like a finger.
     QPointF m_wheelVelocity;
     QElapsedTimer m_wheelClock;
-    double m_overscroll = 0; // How hard the user has pushed past the end.
+    double m_downPush = 0; // Steady downward scrolling near the end of a notebook.
 
     Tool m_tool = Tool::Pen;
     QColor m_penColor{0x18, 0x18, 0x1c};
