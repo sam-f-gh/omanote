@@ -10,6 +10,7 @@ license=('MIT')
 options=('!debug')
 depends=('hicolor-icon-theme' 'poppler-qt6' 'qpdf' 'qt6-base' 'qt6-declarative' 'wayland' 'xdg-desktop-portal')
 makedepends=('gcc' 'make' 'pkgconf' 'wayland-protocols')
+optdepends=('xdg-desktop-portal-gtk: open and save dialogs on desktops whose portal has no file chooser')
 # The PDF round-trip test writes text and reads it back, which needs a font.
 checkdepends=('ttf-liberation')
 
