@@ -8,7 +8,7 @@ Item {
 
     ColumnLayout {
         anchors.centerIn: parent
-        width: Math.min(parent.width - 48, 520)
+        width: Math.min(parent.width - 48, 2 * 264 + 16)
         spacing: 0
 
         Rectangle {
@@ -37,7 +37,7 @@ Item {
         Flow {
             Layout.alignment: Qt.AlignHCenter
             Layout.topMargin: 32
-            Layout.preferredWidth: Math.min(start.width - 48, 2 * 230 + 16)
+            Layout.preferredWidth: Math.min(start.width - 48, 2 * 264 + 16)
             spacing: 16
             Repeater {
                 model: [
@@ -48,7 +48,7 @@ Item {
                     id: card
                     required property var modelData
                     required property int index
-                    width: 230; height: 150
+                    width: 264; height: 150
                     hoverEnabled: true
                     focusPolicy: Qt.NoFocus
                     enabled: !backend.busy

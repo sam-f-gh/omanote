@@ -47,7 +47,6 @@ Popup {
                     text: help.rows[Math.floor(index / 2)][key ? 0 : 1]
                     color: key ? theme.accent : theme.foreground
                     font.pixelSize: 13
-                    font.family: key ? "monospace" : Qt.application.font.family
                 }
             }
         }
