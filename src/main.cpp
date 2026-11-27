@@ -7,10 +7,14 @@
 #include <QFont>
 #include <QGuiApplication>
 #include <QIcon>
+#include <QKeySequence>
 #include <QQmlApplicationEngine>
 #include <QQmlContext>
 #include <QQuickStyle>
+#include <QQuickWindow>
+#include <QTimer>
 #include <QUrl>
+#include <algorithm>
 
 #include "backend.h"
 #include "noteview.h"
@@ -105,6 +109,49 @@ int main(int argc, char *argv[]) {
     engine.load(QUrl("qrc:/Main.qml"));
     if (engine.rootObjects().isEmpty())
         return 1;
+
+    // `omarchy agent look app` runs the app offscreen with these set, to see
+    // the window without a display: size it to OMARCHY_LOOK_SIZE when given,
+    // press the keys in OMARCHY_LOOK_KEYS through the window's Shortcuts,
+    // save it once it has settled, and quit.
+    if (const QString shot = qEnvironmentVariable("OMARCHY_LOOK_SCREENSHOT"); !shot.isEmpty()) {
+        const QStringList size = qEnvironmentVariable("OMARCHY_LOOK_SIZE").split('x');
+        auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst());
+        if (window && size.size() == 2)
+            window->resize(size[0].toInt(), size[1].toInt());
+        // The offscreen platform puts a pointer at the window's corner, where
+        // it hovers the back button and shows its tooltip; take it away.
+        QTimer::singleShot(300, &app, [window] {
+            if (window) {
+                QEvent leave(QEvent::Leave);
+                QCoreApplication::sendEvent(window, &leave);
+            }
+        });
+        const QStringList keys = qEnvironmentVariable("OMARCHY_LOOK_KEYS").split(' ', Qt::SkipEmptyParts);
+        for (int i = 0; i < keys.size(); ++i) {
+            QTimer::singleShot(800 + i * 300, &app, [&engine, key = QKeySequence(keys[i])] {
+                for (QObject *shortcut : engine.rootObjects().constFirst()->findChildren<QObject *>()) {
+                    if (qstrcmp(shortcut->metaObject()->className(), "QQuickShortcut") != 0
+                        || !shortcut->property("enabled").toBool())
+                        continue;
+                    // Omanote's shortcuts mostly list several sequences.
+                    QStringList sequences = shortcut->property("sequences").toStringList();
+                    sequences << shortcut->property("sequence").toString();
+                    if (std::any_of(sequences.cbegin(), sequences.cend(),
+                                    [&](const QString &s) { return !s.isEmpty() && QKeySequence(s) == key; })) {
+                        QMetaObject::invokeMethod(shortcut, "activated");
+                        break;
+                    }
+                }
+            });
+        }
+        const int delay = qEnvironmentVariableIsSet("OMARCHY_LOOK_DELAY_MS") ? qEnvironmentVariableIntValue("OMARCHY_LOOK_DELAY_MS") : 1500;
+        QTimer::singleShot(800 + keys.size() * 300 + delay, &app, [&engine, shot] {
+            if (auto *window = qobject_cast<QQuickWindow *>(engine.rootObjects().constFirst()))
+                window->grabWindow().save(shot);
+            QCoreApplication::quit();
+        });
+    }
 
     return app.exec();
 }
