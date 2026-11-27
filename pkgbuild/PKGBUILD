@@ -4,8 +4,8 @@ pkgrel=1
 pkgdesc='Minimalist PDF notes and annotation for pen, touch and keyboard'
 arch=('x86_64' 'aarch64')
 license=('MIT')
-depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'poppler-qt6' 'qpdf' 'xdg-desktop-portal')
-makedepends=('gcc' 'make')
+depends=('qt6-base' 'qt6-declarative' 'qt6-wayland' 'wayland' 'poppler-qt6' 'qpdf' 'xdg-desktop-portal')
+makedepends=('gcc' 'make' 'wayland-protocols')
 source=()
 sha256sums=()
 

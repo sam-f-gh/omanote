@@ -1,4 +1,5 @@
 #include "noteview.h"
+#include "touchpadhold.h"
 
 #include <QGuiApplication>
 #include <QNativeGestureEvent>
@@ -207,6 +208,11 @@ NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
     connect(&m_scheduleTimer, &QTimer::timeout, this, &NoteView::scheduleRenders);
 
     connect(&m_renderer, &TileRenderer::rendered, this, &NoteView::onRendered);
+    // Fingers landing on the touchpad stop a fling, before they even move.
+    connect(TouchpadHold::instance(), &TouchpadHold::fingersDown, this, [this] {
+        stopFling();
+        m_wheelVelocity = {};
+    });
     m_renderIdle.setSingleShot(true);
     m_renderIdle.setInterval(qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") > 0
                                  ? qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") : 30000);
@@ -457,7 +463,11 @@ void NoteView::scheduleRenders() {
                     if (t.scale == scale && t.tx == tx && t.ty == ty)
                         tile = &t;
                 if (!tile) {
-                    pt.tiles.append(Tile{scale, tx, ty});
+                    Tile fresh;
+                    fresh.scale = scale;
+                    fresh.tx = tx;
+                    fresh.ty = ty;
+                    pt.tiles.append(fresh);
                     tile = &pt.tiles.last();
                     changed = true;
                 }
@@ -1188,6 +1198,7 @@ void NoteView::mouseUngrabEvent() {
 }
 
 void NoteView::hoverMoveEvent(QHoverEvent *e) {
+    TouchpadHold::instance()->ensure(); // Free once bound; needs a pointer to exist.
     if (realMouse(e))
         setHover(e->position(), m_tool == Tool::Eraser);
 }
@@ -1196,6 +1207,7 @@ void NoteView::hoverLeaveEvent(QHoverEvent *) { setHover(m_overlay->hover, false
 
 void NoteView::wheelEvent(QWheelEvent *e) {
     e->accept();
+    TouchpadHold::instance()->ensure();
     emit interacted();
     if (e->modifiers() & Qt::ControlModifier) {
         stopFling();

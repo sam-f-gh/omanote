@@ -9,15 +9,15 @@
 float Stroke::radius(int i) const { return Ink::radiusFor(tool, width, samples[i].p); }
 
 std::shared_ptr<const QPainterPath> Stroke::path() const {
-    auto cached = std::atomic_load(&m_path);
+    auto cached = m_path.load();
     if (!cached) {
         cached = std::make_shared<const QPainterPath>(Ink::outline(*this));
-        std::atomic_store(&m_path, cached);
+        m_path.store(cached);
     }
     return cached;
 }
 
-void Stroke::releasePath() const { std::atomic_store(&m_path, std::shared_ptr<const QPainterPath>()); }
+void Stroke::releasePath() const { m_path.store(nullptr); }
 
 void Stroke::invalidate() {
     releasePath();

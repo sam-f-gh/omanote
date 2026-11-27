@@ -7,6 +7,7 @@
 #include <QPointF>
 #include <QRectF>
 #include <QVector>
+#include <atomic>
 #include <memory>
 
 class QPainter;
@@ -18,6 +19,26 @@ enum class Tool { Pen = 0, Highlighter = 1, Eraser = 2 };
 
 struct Sample {
     float x = 0, y = 0, p = 0.5f;
+};
+
+// A cached outline that render threads may read while the GUI drops it.
+// Copies start empty: the outline is cheap to rebuild and copies are rare.
+class PathCache {
+public:
+    PathCache() = default;
+    PathCache(const PathCache &) {}
+    PathCache &operator=(const PathCache &) { store(nullptr); return *this; }
+#if defined(__cpp_lib_atomic_shared_ptr)
+    std::shared_ptr<const QPainterPath> load() const { return m_value.load(); }
+    void store(std::shared_ptr<const QPainterPath> p) const { m_value.store(std::move(p)); }
+private:
+    mutable std::atomic<std::shared_ptr<const QPainterPath>> m_value;
+#else
+    std::shared_ptr<const QPainterPath> load() const { return std::atomic_load(&m_value); }
+    void store(std::shared_ptr<const QPainterPath> p) const { std::atomic_store(&m_value, std::move(p)); }
+private:
+    mutable std::shared_ptr<const QPainterPath> m_value;
+#endif
 };
 
 struct Stroke {
@@ -42,7 +63,7 @@ struct Stroke {
     void invalidate();
 
 private:
-    mutable std::shared_ptr<const QPainterPath> m_path;
+    PathCache m_path;
     QRectF m_bounds;
     bool m_finalized = false;
 };
