@@ -49,7 +49,6 @@
   "Zoom out (Ctrl+-)": "Zoom ud (Ctrl+-)",
   "Can't read %1: %2": "Kan ikke læse %1: %2",
   "Couldn't build the PDF (%1)": "Kunne ikke bygge PDF'en (%1)",
-  "Couldn't render this PDF": "Kunne ikke vise denne PDF",
   "Couldn't save %1: %2": "Kunne ikke gemme %1: %2",
   "File dialog unavailable: %1": "Fildialog utilgængelig: %1",
   "File not found: %1": "Filen findes ikke: %1",

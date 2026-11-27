@@ -21,6 +21,7 @@ private slots:
 private:
     enum class Action { None, Open, Save };
     void request(const QString &method, const QString &title, QVariantMap options, Action action);
+    void subscribeResponse(bool on);
 
     QString m_requestPath;
     Action m_action = Action::None;

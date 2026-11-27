@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QByteArray>
 #include <QList>
 #include <QObject>
 #include <QSizeF>
@@ -115,6 +114,7 @@ signals:
     void historyChanged();
 
 private:
+    void run(std::unique_ptr<Command> command);
     void push(std::unique_ptr<Command> command);
     void ensureTrailingPage();
 

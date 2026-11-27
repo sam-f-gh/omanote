@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 Item {
@@ -55,7 +54,7 @@ Item {
                     enabled: !backend.busy
                     onClicked: index === 0 ? backend.newNote() : backend.openDialog()
                     background: Rectangle {
-                        radius: Math.min(14, theme.radius + 4)
+                        radius: theme.radius > 0 ? Math.min(14, theme.radius + 4) : 0
                         color: card.down ? Qt.alpha(theme.accent, 0.18) : card.hovered ? Qt.alpha(theme.foreground, 0.07) : theme.surface
                         border.width: 1
                         border.color: card.hovered ? theme.accent : Qt.alpha(theme.foreground, 0.12)

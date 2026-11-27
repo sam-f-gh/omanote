@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 
 // A compact grid of ink colors, all legible on white paper.
 Popup {
@@ -18,8 +17,7 @@ Popup {
     padding: 10
     modal: false
     focus: true
-    Material.roundedScale: theme.radius
-    background: Pill { radius: Math.min(12, theme.radius + 4) }
+    background: Pill {}
 
     readonly property var palette: [
         "#18181c", "#4a4a52", "#8a8a94", "#ffffff", "#7a4a1f", "#b5651d",

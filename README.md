@@ -64,7 +64,7 @@ bin/build      # build/omanote
 bin/test       # tests, run offscreen
 ```
 
-C++17 and Qt 6 Quick, built with `qmake6`. Rendering uses poppler; reading and
+C++20 and Qt 6 Quick, built with `qmake6`. Rendering uses poppler; reading and
 writing PDFs uses qpdf.
 
 | Source | Role |

@@ -8,7 +8,6 @@
 #include <QDBusObjectPath>
 #include <QDBusPendingCallWatcher>
 #include <QDBusPendingReply>
-#include <QDir>
 #include <QFileInfo>
 #include <QRandomGenerator>
 #include <QStandardPaths>
@@ -67,6 +66,16 @@ void PortalFilePicker::savePdf(const QString &suggestedPath) {
             {{"current_name", name}, {"current_folder", folderBytes(folder)}}, Action::Save);
 }
 
+void PortalFilePicker::subscribeResponse(bool on) {
+    auto bus = QDBusConnection::sessionBus();
+    if (on)
+        bus.connect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request", "Response",
+                    this, SLOT(handleResponse(uint, QVariantMap)));
+    else
+        bus.disconnect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request", "Response",
+                       this, SLOT(handleResponse(uint, QVariantMap)));
+}
+
 void PortalFilePicker::request(const QString &method, const QString &title, QVariantMap options, Action action) {
     if (m_action != Action::None)
         return;
@@ -86,8 +95,7 @@ void PortalFilePicker::request(const QString &method, const QString &title, QVar
     QString sender = bus.baseService().mid(1).replace('.', '_');
     m_requestPath = QString("/org/freedesktop/portal/desktop/request/%1/%2").arg(sender, token);
     options.insert("handle_token", token);
-    bus.connect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request", "Response",
-                this, SLOT(handleResponse(uint, QVariantMap)));
+    subscribeResponse(true);
     m_action = action;
 
     auto msg = QDBusMessage::createMethodCall("org.freedesktop.portal.Desktop", "/org/freedesktop/portal/desktop",
@@ -98,8 +106,7 @@ void PortalFilePicker::request(const QString &method, const QString &title, QVar
         QDBusPendingReply<QDBusObjectPath> reply = *w;
         w->deleteLater();
         if (reply.isError()) {
-            QDBusConnection::sessionBus().disconnect("org.freedesktop.portal.Desktop", m_requestPath,
-                "org.freedesktop.portal.Request", "Response", this, SLOT(handleResponse(uint, QVariantMap)));
+            subscribeResponse(false);
             m_action = Action::None;
             emit failed(tr("File dialog unavailable: %1").arg(reply.error().message()));
             return;
@@ -107,19 +114,15 @@ void PortalFilePicker::request(const QString &method, const QString &title, QVar
         // Older portals return a different handle; follow it.
         const QString path = reply.value().path();
         if (path != m_requestPath) {
-            auto bus = QDBusConnection::sessionBus();
-            bus.disconnect("org.freedesktop.portal.Desktop", m_requestPath, "org.freedesktop.portal.Request",
-                           "Response", this, SLOT(handleResponse(uint, QVariantMap)));
+            subscribeResponse(false);
             m_requestPath = path;
-            bus.connect("org.freedesktop.portal.Desktop", path, "org.freedesktop.portal.Request", "Response",
-                        this, SLOT(handleResponse(uint, QVariantMap)));
+            subscribeResponse(true);
         }
     });
 }
 
 void PortalFilePicker::handleResponse(uint response, const QVariantMap &results) {
-    QDBusConnection::sessionBus().disconnect("org.freedesktop.portal.Desktop", m_requestPath,
-        "org.freedesktop.portal.Request", "Response", this, SLOT(handleResponse(uint, QVariantMap)));
+    subscribeResponse(false);
     const Action action = m_action;
     m_action = Action::None;
     const QStringList uris = results.value("uris").toStringList();

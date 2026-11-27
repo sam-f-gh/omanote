@@ -2,18 +2,18 @@
 
 #include <QPainter>
 #include <QVariant>
+#include <algorithm>
 #include <cmath>
 #include <functional>
 #include <poppler-optcontent.h>
 #include <poppler-qt6.h>
 #include <thread>
 
-#include "pdfstore.h"
-
 namespace {
 constexpr qint64 BackgroundBudget = 96ll << 20; // Bytes of cached PDF tiles.
 
-bool sameTile(const TileRenderer::Job &a, const TileRenderer::Job &b) {
+template <typename A, typename B>
+bool sameTile(const A &a, const B &b) {
     return a.page == b.page && a.tx == b.tx && a.ty == b.ty && a.scale == b.scale;
 }
 }
@@ -81,21 +81,36 @@ void TileRenderer::hideInk(Poppler::Document &doc) {
     walk({});
 }
 
-void TileRenderer::setPdf(const SourcePtr &source) {
-    QMutexLocker lock(&m_mutex);
-    m_pdf = source;
-    m_jobs.clear();
-    ++m_generation;
+void TileRenderer::clearBackgroundCache() {
     QMutexLocker bg(&m_bgMutex);
     m_bg.clear();
     m_bgOrder.clear();
     m_bgBytes = 0;
 }
 
+void TileRenderer::setPdf(const SourcePtr &source) {
+    {
+        QMutexLocker lock(&m_mutex);
+        m_pdf = source;
+        m_jobs.clear();
+        m_wanted.clear();
+        ++m_generation;
+    }
+    clearBackgroundCache();
+}
+
 void TileRenderer::setJobs(const QList<Job> &jobs) {
     QMutexLocker lock(&m_mutex);
+    if (jobs.size() == m_wanted.size() &&
+        std::equal(jobs.begin(), jobs.end(), m_wanted.begin(), [](const Job &a, const TileKey &b) {
+            return sameTile(a, b) && a.revision == b.revision;
+        }))
+        return;
     m_jobs.clear();
+    m_wanted.clear();
+    m_wanted.reserve(jobs.size());
     for (const auto &job : jobs) {
+        m_wanted.append({job.page, job.scale, job.tx, job.ty, job.revision});
         bool inFlight = false;
         for (const auto &w : m_workers)
             if (w->busy && sameTile(w->current, job) && w->current.revision == job.revision)
@@ -105,19 +120,18 @@ void TileRenderer::setJobs(const QList<Job> &jobs) {
     }
     // Workers check wanted() while poppler renders, so dropping a job from
     // the list is enough to abort it.
-    m_wanted = jobs;
     m_wake.wakeAll();
 }
 
 void TileRenderer::releaseIdle() {
-    QMutexLocker lock(&m_mutex);
-    for (auto &w : m_workers)
-        w->drop = true;
-    m_wake.wakeAll();
-    QMutexLocker bg(&m_bgMutex);
-    m_bg.clear();
-    m_bgOrder.clear();
-    m_bgBytes = 0;
+    {
+        QMutexLocker lock(&m_mutex);
+        m_wanted.clear();
+        for (auto &w : m_workers)
+            w->drop = true;
+        m_wake.wakeAll();
+    }
+    clearBackgroundCache();
 }
 
 qint64 TileRenderer::cachedBytes() {

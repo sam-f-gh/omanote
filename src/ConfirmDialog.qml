@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // A small modal question with up to three answers.
@@ -19,9 +18,8 @@ Popup {
     focus: true
     padding: 22
     width: Math.min(420, (parent ? parent.width : 420) - 32)
-    Material.roundedScale: theme.radius
     Overlay.modal: Rectangle { color: Qt.alpha("#000000", 0.45) }
-    background: Pill { radius: Math.min(14, theme.radius + 4) }
+    background: Pill {}
 
     contentItem: ColumnLayout {
         spacing: 10

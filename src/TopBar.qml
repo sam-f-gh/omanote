@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // Home · title | tools (centered) | history · pages · save
@@ -8,7 +7,6 @@ Rectangle {
     id: bar
     property var view
     signal homeRequested()
-    signal saveRequested()
 
     readonly property bool narrow: width < 760
     // Very narrow tiles drop the page counter and slim the tool buttons.
@@ -55,7 +53,7 @@ Rectangle {
         anchors.verticalCenter: parent.verticalCenter
         width: toolRow.width + 8
         height: 44
-        radius: Math.min(10, theme.radius + 2)
+        radius: theme.radius > 0 ? Math.min(10, theme.radius + 2) : 0
         color: Qt.alpha(theme.foreground, 0.06)
         Row {
             id: toolRow
@@ -110,7 +108,6 @@ Rectangle {
             font.features: { "tnum": 1 }
             horizontalAlignment: Text.AlignHCenter
             Layout.minimumWidth: 44
-            property var _lang: translator.language
         }
         IconButton {
             glyph: "down"; tip: qsTr("Next page (PageDown)")
@@ -123,7 +120,7 @@ Rectangle {
         IconButton {
             glyph: "save"; tip: qsTr("Save (Ctrl+S)")
             enabled: !backend.busy
-            onClicked: bar.saveRequested()
+            onClicked: backend.save()
         }
     }
 }

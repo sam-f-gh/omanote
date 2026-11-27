@@ -48,12 +48,11 @@ public:
 
     Q_INVOKABLE void newNote();
     Q_INVOKABLE void openDialog();
-    Q_INVOKABLE bool openFile(const QString &pathOrUrl);
+    void openFile(const QString &pathOrUrl);
     Q_INVOKABLE void save();
     Q_INVOKABLE void saveAs();
-    Q_INVOKABLE bool saveTo(const QString &path);
+    bool saveTo(const QString &path);
     Q_INVOKABLE void closeDocument();
-    Q_INVOKABLE void clearError();
 
     static const QList<double> &penWidths();
     static const QList<double> &highlightWidths();
@@ -71,6 +70,8 @@ signals:
 private:
     void setDocument(Document *doc);
     void setError(const QString &message);
+    void reportError(const QString &message);
+    void cancelAwaitingSave();
     void setBusy(bool busy);
     void store();
 

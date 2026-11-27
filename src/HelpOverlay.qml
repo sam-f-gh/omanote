@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 Popup {
@@ -9,9 +8,8 @@ Popup {
     modal: true
     focus: true
     padding: 24
-    Material.roundedScale: theme.radius
     Overlay.modal: Rectangle { color: Qt.alpha("#000000", 0.45) }
-    background: Pill { radius: Math.min(14, theme.radius + 4) }
+    background: Pill {}
 
     readonly property var rows: [
         ["P · H · E", qsTr("Pen · Highlighter · Eraser")],

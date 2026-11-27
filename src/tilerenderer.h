@@ -1,6 +1,5 @@
 #pragma once
 
-#include <QByteArray>
 #include <QHash>
 #include <QImage>
 #include <QList>
@@ -15,7 +14,6 @@
 #include "ink.h"
 #include "pdfstore.h"
 
-class QThread;
 namespace Poppler { class Document; }
 
 // Renders pages in tiles (PDF background + committed ink) on worker threads.
@@ -70,16 +68,24 @@ private:
     };
     friend size_t qHash(const BgKey &k, size_t seed) { return qHashMulti(seed, k.source, k.tx, k.ty, k.scale); }
 
+    struct TileKey {
+        quint64 page = 0;
+        double scale = 1;
+        int tx = 0, ty = 0;
+        int revision = 0;
+    };
+
     void run(Worker *worker);
     QImage render(Worker &worker, const Job &job);
     bool wanted(const Job &job);
     QImage cachedBackground(const BgKey &key);
     void storeBackground(const BgKey &key, const QImage &image);
+    void clearBackgroundCache();
 
     QMutex m_mutex;
     QWaitCondition m_wake;
     QList<Job> m_jobs;
-    QList<Job> m_wanted;
+    QList<TileKey> m_wanted;
     SourcePtr m_pdf; // Held here too, so the file stays open while workers read it.
     std::atomic<int> m_generation{0};
     bool m_quit = false;

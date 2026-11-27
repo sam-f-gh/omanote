@@ -36,7 +36,6 @@ class NoteView : public QQuickItem {
     Q_PROPERTY(double zoom READ zoom NOTIFY viewChanged)
     Q_PROPERTY(int currentPage READ currentPage NOTIFY viewChanged)
     Q_PROPERTY(int pageCount READ pageCount NOTIFY viewChanged)
-    Q_PROPERTY(bool eraserEngaged READ eraserEngaged NOTIFY eraserChanged)
 
 public:
     explicit NoteView(QQuickItem *parent = nullptr);
@@ -51,7 +50,6 @@ public:
     double zoom() const { return m_view.zoom(); }
     int currentPage() const { return m_view.currentPage(); }
     int pageCount() const { return m_view.pageCount(); }
-    bool eraserEngaged() const;
     const Viewport &viewport() const { return m_view; }
     // True once every visible tile shows the current ink (for tests).
     bool tilesCurrent() const;
@@ -62,7 +60,7 @@ public:
     Q_INVOKABLE void fitWidth();
     Q_INVOKABLE void nextPage();
     Q_INVOKABLE void previousPage();
-    Q_INVOKABLE void goToPage(int index);
+    void goToPage(int index);
     Q_INVOKABLE void addPage();      // Blank page after the current one.
     Q_INVOKABLE bool clearCurrentPage();
     Q_INVOKABLE bool currentPageHasInk() const;
@@ -72,7 +70,6 @@ signals:
     void toolChanged();
     void backdropChanged();
     void viewChanged();
-    void eraserChanged();
     void interacted();  // Any new gesture; transient status hides on it.
 
 protected:
@@ -100,7 +97,6 @@ private:
         double scale = 0;
         int tx = 0, ty = 0;
         int revision = -1;        // Ink revision shown; -1 = nothing yet.
-        int requested = -1;       // Revision asked of the renderer.
         bool blank = false;       // Plain white paper: no texture needed.
         QImage image{};           // Waiting for upload, then dropped.
         quint64 serial = 0;       // Bumped per new image.
@@ -119,6 +115,8 @@ private:
     void beginPan(QPointF pos, Gesture kind, Source source);
     void panTo(QPointF pos);
     void endPan();
+    void finishGesture();
+    void cancelGesture();
     void stopFling() { m_flinging = false; }
     void startFling(QPointF velocity);
     bool scrollBy(double dx, double dy);
@@ -128,26 +126,25 @@ private:
     void flingFrame();
     bool touchBlocked() const;
     void setHover(QPointF pos, bool visible);
-    void setEraseEngaged(bool on);
 
     void syncPages();
-    void viewMoved();
+    void viewMoved(double dy = 0);
     void zoomTo(double zoom, QPointF focus);
     void scheduleRenders();
     void onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation);
     void onPageChanged(quint64 id, const QRectF &region);
     void resetTiles();
+    Tile *findTile(PageTiles &pt, double scale, int tx, int ty);
+    const Tile *findTile(const PageTiles &pt, double scale, int tx, int ty) const;
+    bool tilesReady(quint64 pageId, int index, double scale, int minRevision) const;
     double deviceRatio() const;
     double targetScale() const;
     bool needsBackground(const Page &page) const;
     QRect tileRange(int index, double scale, double margin) const;
     QRectF snapped(QRectF r) const;
-    QRectF strokeScreenRect(int fromSample) const;
     void drawLive(int fromSample);
     void clearLive();
     void maybeClearLive();
-    QColor activeColor(Tool tool) const;
-    double activeWidth(Tool tool) const;
 
     QPointer<Document> m_doc;
     Viewport m_view;
@@ -186,7 +183,10 @@ private:
     // out again only when this stamp changes (zoom, width, scale, pages).
     QSGTransformNode *m_contentNode = nullptr;
     quint64 m_layoutStamp = 1;
-    struct LayoutKey { double zoom = 0, width = 0, dpr = 0; quint64 pages = 0; } m_layoutKey;
+    struct LayoutKey {
+        double zoom = 0, width = 0, dpr = 0; quint64 pages = 0;
+        bool operator==(const LayoutKey &) const = default;
+    } m_layoutKey;
     quint64 m_pagesVersion = 0;
     QHash<quint64, int> m_indexById;
 
@@ -224,7 +224,6 @@ private:
     // Last values announced to QML, so bindings only re-run on real changes.
     double m_shownZoom = -1;
     int m_shownPage = -1, m_shownCount = -1;
-    QList<TileRenderer::Job> m_lastJobs;
 
     double m_pinchStartZoom = 1, m_pinchStartDistance = 1;
     QPointF m_pinchCentroid;
@@ -235,5 +234,4 @@ private:
     bool m_stylusNear = false;
     bool m_stylusDown = false;
     QElapsedTimer m_stylusClock;
-    bool m_eraseEngaged = false;
 };

@@ -1,12 +1,13 @@
 #include "backend.h"
 
 #include <QColor>
-#include <QFutureWatcher>
-#include <QtConcurrent>
-#include "pdfstore.h"
 #include <QFileInfo>
+#include <QFutureWatcher>
 #include <QUrl>
+#include <QtConcurrent>
 #include <algorithm>
+
+#include "pdfstore.h"
 
 const QList<double> &Backend::penWidths() {
     static const QList<double> w{1.5, 2.5, 5.0};
@@ -37,21 +38,12 @@ Backend::Backend(FilePicker *picker, QObject *parent)
     });
     connect(m_picker, &FilePicker::cancelled, this, [this] {
         setBusy(false);
-        if (m_awaitingSave) {
-            m_awaitingSave = false;
-            emit saveCancelled();
-        }
+        cancelAwaitingSave();
     });
     connect(m_picker, &FilePicker::failed, this, [this](const QString &message) {
         setBusy(false);
-        if (m_awaitingSave) {
-            m_awaitingSave = false;
-            emit saveCancelled();
-        }
-        if (m_doc)
-            emit status(message);
-        else
-            setError(message);
+        cancelAwaitingSave();
+        reportError(message);
     });
 }
 
@@ -78,7 +70,21 @@ void Backend::setError(const QString &message) {
     emit errorChanged();
 }
 
-void Backend::clearError() { setError({}); }
+void Backend::reportError(const QString &message) {
+    // Errors surface in the window: inline on the start screen, as a status
+    // line over an open document.
+    if (m_doc)
+        emit status(message);
+    else
+        setError(message);
+}
+
+void Backend::cancelAwaitingSave() {
+    if (m_awaitingSave) {
+        m_awaitingSave = false;
+        emit saveCancelled();
+    }
+}
 
 void Backend::setBusy(bool busy) {
     if (busy != m_busy) {
@@ -88,7 +94,7 @@ void Backend::setBusy(bool busy) {
 }
 
 void Backend::newNote() {
-    clearError();
+    setError({});
     setDocument(Document::createNote());
 }
 
@@ -99,7 +105,7 @@ void Backend::openDialog() {
 
 // Parsing runs on a worker so a big PDF never freezes the window; the
 // result is applied only if nothing newer was asked for meanwhile.
-bool Backend::openFile(const QString &pathOrUrl) {
+void Backend::openFile(const QString &pathOrUrl) {
     const QUrl url(pathOrUrl);
     const QString path = url.isLocalFile() ? url.toLocalFile() : pathOrUrl;
     const int ticket = ++m_openTicket;
@@ -113,15 +119,10 @@ bool Backend::openFile(const QString &pathOrUrl) {
         setBusy(false);
         Result r = watcher->result();
         if (!r.ok) {
-            // Errors surface in the window: inline on the start screen, as a
-            // status line over an open document.
-            if (m_doc)
-                emit status(r.error);
-            else
-                setError(r.error);
+            reportError(r.error);
             return;
         }
-        clearError();
+        setError({});
         setDocument(Document::fromLoaded(path, r.loaded));
     });
     watcher->setFuture(QtConcurrent::run([path] {
@@ -129,7 +130,6 @@ bool Backend::openFile(const QString &pathOrUrl) {
         r.ok = PdfStore::load(path, r.loaded, r.error);
         return r;
     }));
-    return true;
 }
 
 void Backend::save() {
@@ -204,7 +204,6 @@ void Backend::setTool(int tool) {
     tool = std::clamp(tool, 0, 2);
     if (tool == m_tool) return;
     m_tool = tool;
-    store();
     emit toolChanged();
 }
 

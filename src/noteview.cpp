@@ -14,14 +14,17 @@
 #include <QSGRectangleNode>
 #include <QSGTexture>
 #include <QTabletEvent>
-#include <QtMath>
 #include <algorithm>
 #include <cmath>
 
 namespace {
 constexpr int PalmGraceMs = 200;
 constexpr int HoverTrustMs = 1500;
-const int LayerIdleMs = qEnvironmentVariableIntValue("OMANOTE_LAYER_IDLE_MS") > 0 ? qEnvironmentVariableIntValue("OMANOTE_LAYER_IDLE_MS") : 15000;
+int envMs(const char *name, int fallback) {
+    const int v = qEnvironmentVariableIntValue(name);
+    return v > 0 ? v : fallback;
+}
+const int LayerIdleMs = envMs("OMANOTE_LAYER_IDLE_MS", 15000);
 constexpr int UploadsPerFrame = 4; // 512² tiles: ~4 MB a frame keeps frames smooth.
 
 // A soft shadow as one ring of vertex-colored triangles from the sheet's edge
@@ -152,14 +155,16 @@ public:
         p->setCompositionMode(QPainter::CompositionMode_Source);
         p->fillRect(QRectF(0, 0, width(), height()), Qt::transparent);
         p->setCompositionMode(QPainter::CompositionMode_SourceOver);
-        if (!highlight.isNull() && !dirty.isEmpty()) {
-            p->save();
-            p->setOpacity(Ink::HighlightAlpha);
-            p->drawImage(QPointF(0, 0), highlight);
-            p->restore();
+        if (!dirty.isEmpty()) {
+            if (!highlight.isNull()) {
+                p->save();
+                p->setOpacity(Ink::HighlightAlpha);
+                p->drawImage(QPointF(0, 0), highlight);
+                p->restore();
+            }
+            if (!pen.isNull())
+                p->drawImage(QPointF(0, 0), pen);
         }
-        if (!pen.isNull() && !dirty.isEmpty())
-            p->drawImage(QPointF(0, 0), pen);
         if (hoverVisible) {
             p->setRenderHint(QPainter::Antialiasing);
             p->setBrush(Qt::NoBrush);
@@ -177,8 +182,6 @@ public:
     QPointF hover;
     bool hoverVisible = false;
     double hoverRadius = 0;
-
-    bool parked() const { return m_parked; }
 
 private:
     QTimer m_idle;
@@ -211,8 +214,7 @@ NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
     // Fingers landing on the touchpad stop a fling, before they even move.
     connect(TouchpadHold::instance(), &TouchpadHold::fingersDown, this, &NoteView::stopScrolling);
     m_renderIdle.setSingleShot(true);
-    m_renderIdle.setInterval(qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") > 0
-                                 ? qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") : 30000);
+    m_renderIdle.setInterval(envMs("OMANOTE_RENDER_IDLE_MS", 30000));
     connect(&m_renderIdle, &QTimer::timeout, &m_renderer, &TileRenderer::releaseIdle);
     // Proximity events go to the application, not to items.
     qApp->installEventFilter(this);
@@ -231,11 +233,9 @@ void NoteView::setDocument(Document *doc) {
     m_tiles.clear();
     m_stroke.reset();
     m_strokePage.reset();
-    m_gesture = Gesture::None;
-    m_source = Source::None;
+    cancelGesture();
     clearLive();
     m_renderer.setPdf(doc ? doc->source() : nullptr);
-    m_lastJobs.clear();
     if (doc) {
         connect(doc, &Document::pagesChanged, this, &NoteView::syncPages);
         connect(doc, &Document::pageChanged, this, &NoteView::onPageChanged);
@@ -261,18 +261,6 @@ void NoteView::setBackdrop(const QColor &c) {
     update();
     emit backdropChanged();
 }
-
-bool NoteView::eraserEngaged() const { return m_eraseEngaged || m_tool == Tool::Eraser; }
-
-void NoteView::setEraseEngaged(bool on) {
-    if (on == m_eraseEngaged)
-        return;
-    m_eraseEngaged = on;
-    emit eraserChanged();
-}
-
-QColor NoteView::activeColor(Tool tool) const { return tool == Tool::Highlighter ? m_highlightColor : m_penColor; }
-double NoteView::activeWidth(Tool tool) const { return tool == Tool::Highlighter ? m_highlightWidth : m_penWidth; }
 
 // --- Navigation -------------------------------------------------------------
 
@@ -358,8 +346,8 @@ void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeomet
         viewMoved();
 }
 
-void NoteView::viewMoved() {
-    managePaper(0);
+void NoteView::viewMoved(double dy) {
+    managePaper(dy);
     update();
     // Ink waiting on tiles was drawn for the old view; it's a few ms from
     // landing in the tiles, so just drop it rather than redraw it.
@@ -457,6 +445,36 @@ QRect NoteView::tileRange(int index, double scale, double margin) const {
 
 // --- Tiles ------------------------------------------------------------------
 
+NoteView::Tile *NoteView::findTile(PageTiles &pt, double scale, int tx, int ty) {
+    for (auto &t : pt.tiles)
+        if (t.scale == scale && t.tx == tx && t.ty == ty)
+            return &t;
+    return nullptr;
+}
+
+const NoteView::Tile *NoteView::findTile(const PageTiles &pt, double scale, int tx, int ty) const {
+    for (const auto &t : pt.tiles)
+        if (t.scale == scale && t.tx == tx && t.ty == ty)
+            return &t;
+    return nullptr;
+}
+
+bool NoteView::tilesReady(quint64 pageId, int index, double scale, int minRevision) const {
+    const QRect range = tileRange(index, scale, 0);
+    if (range.isEmpty())
+        return true;
+    const auto it = m_tiles.constFind(pageId);
+    if (it == m_tiles.constEnd())
+        return false;
+    for (int ty = range.top(); ty <= range.bottom(); ++ty)
+        for (int tx = range.left(); tx <= range.right(); ++tx) {
+            const Tile *t = findTile(*it, scale, tx, ty);
+            if (!t || t->revision < minRevision)
+                return false;
+        }
+    return true;
+}
+
 void NoteView::scheduleRenders() {
     if (!m_doc || m_zooming || width() <= 0)
         return;
@@ -477,10 +495,7 @@ void NoteView::scheduleRenders() {
 
         for (int ty = wantedRange.top(); ty <= wantedRange.bottom() && !wantedRange.isEmpty(); ++ty) {
             for (int tx = wantedRange.left(); tx <= wantedRange.right(); ++tx) {
-                Tile *tile = nullptr;
-                for (auto &t : pt.tiles)
-                    if (t.scale == scale && t.tx == tx && t.ty == ty)
-                        tile = &t;
+                Tile *tile = findTile(pt, scale, tx, ty);
                 if (!tile) {
                     pt.tiles.append(Tile{.scale = scale, .tx = tx, .ty = ty});
                     tile = &pt.tiles.last();
@@ -490,10 +505,11 @@ void NoteView::scheduleRenders() {
                     continue;
                 // White paper with no ink here needs no texture at all.
                 const QRectF area = TileRenderer::tilePoints(page->size, scale, tx, ty);
-                bool inked = false;
+                QList<StrokePtr> strokes;
                 for (const auto &s : page->strokes)
-                    if (s->bounds().intersects(area)) { inked = true; break; }
-                if (!background && !inked) {
+                    if (s->bounds().intersects(area))
+                        strokes.append(s);
+                if (!background && strokes.isEmpty()) {
                     tile->blank = true;
                     tile->revision = page->revision;
                     tile->image = QImage();
@@ -501,10 +517,9 @@ void NoteView::scheduleRenders() {
                     changed = true;
                     continue;
                 }
-                tile->requested = page->revision;
                 TileRenderer::Job job{page->id, background ? page->source : -1, page->size, scale, tx, ty,
-                                      page->revision, page->strokes};
-                (visibleRange.contains(tx, ty) ? urgent : later).append(job);
+                                      page->revision, std::move(strokes)};
+                (visibleRange.contains(tx, ty) ? urgent : later).append(std::move(job));
             }
         }
 
@@ -534,17 +549,7 @@ void NoteView::scheduleRenders() {
         it = m_tiles.erase(it);
         changed = true;
     }
-    // Same wish list as last time (the usual case mid-scroll): leave the
-    // workers asleep instead of waking them to find nothing new.
-    const QList<TileRenderer::Job> jobs = urgent + later;
-    const bool sameJobs = jobs.size() == m_lastJobs.size() &&
-        std::equal(jobs.begin(), jobs.end(), m_lastJobs.begin(), [](const auto &a, const auto &b) {
-            return a.page == b.page && a.tx == b.tx && a.ty == b.ty && a.scale == b.scale && a.revision == b.revision;
-        });
-    if (!sameJobs) {
-        m_renderer.setJobs(jobs);
-        m_lastJobs = jobs;
-    }
+    m_renderer.setJobs(urgent + later);
     if (changed)
         update();
     maybeClearLive();
@@ -557,34 +562,30 @@ void NoteView::onRendered(quint64 page, double scale, int tx, int ty, int revisi
     auto it = m_tiles.find(page);
     if (it == m_tiles.end())
         return;
-    for (auto &t : it->tiles) {
-        if (t.scale == scale && t.tx == tx && t.ty == ty) {
-            if (revision < t.revision)
-                return;
-            t.image = image;
-            t.revision = revision;
-            t.blank = false;
-            ++t.serial;
-            update();
-            maybeClearLive();
-            if (revision != it->revision || !m_zooming)
-                m_scheduleTimer.start(); // Retire stand-ins, or catch up.
+    if (Tile *t = findTile(*it, scale, tx, ty)) {
+        if (revision < t->revision)
             return;
-        }
+        t->image = image;
+        t->revision = revision;
+        t->blank = false;
+        ++t->serial;
+        update();
+        maybeClearLive();
+        if (revision != it->revision || !m_zooming)
+            m_scheduleTimer.start(); // Retire stand-ins, or catch up.
     }
 }
 
 void NoteView::onPageChanged(quint64 id, const QRectF &region) {
     auto it = m_tiles.find(id);
-    const auto pageIt = std::find_if(m_doc->pages().begin(), m_doc->pages().end(),
-                                     [id](const PagePtr &p) { return p->id == id; });
-    if (it != m_tiles.end() && pageIt != m_doc->pages().end()) {
+    const auto page = m_doc ? m_doc->page(m_indexById.value(id, -1)) : nullptr;
+    if (it != m_tiles.end() && page) {
         // Tiles the change didn't touch are still exactly right.
-        const int now = (*pageIt)->revision;
+        const int now = page->revision;
         const QRectF touched = region.adjusted(-1, -1, 1, 1);
         for (auto &t : it->tiles)
             if (t.revision == it->revision &&
-                !TileRenderer::tilePoints((*pageIt)->size, t.scale, t.tx, t.ty).intersects(touched))
+                !TileRenderer::tilePoints(page->size, t.scale, t.tx, t.ty).intersects(touched))
                 t.revision = now;
         it->revision = now;
     }
@@ -593,7 +594,7 @@ void NoteView::onPageChanged(quint64 id, const QRectF &region) {
 
 void NoteView::resetTiles() {
     m_tiles.clear();
-    m_lastJobs.clear();
+    m_renderer.setJobs({});
     scheduleRenders();
 }
 
@@ -603,17 +604,8 @@ bool NoteView::tilesCurrent() const {
     const double scale = targetScale();
     for (int index : m_view.visiblePages(0)) {
         const auto page = m_doc->page(index);
-        const QRect range = tileRange(index, scale, 0);
-        const auto pt = m_tiles.value(page->id);
-        for (int ty = range.top(); ty <= range.bottom() && !range.isEmpty(); ++ty)
-            for (int tx = range.left(); tx <= range.right(); ++tx) {
-                bool ok = false;
-                for (const auto &t : pt.tiles)
-                    if (t.scale == scale && t.tx == tx && t.ty == ty && t.revision == page->revision)
-                        ok = true;
-                if (!ok)
-                    return false;
-            }
+        if (!tilesReady(page->id, index, scale, page->revision))
+            return false;
     }
     return true;
 }
@@ -655,8 +647,7 @@ QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
     shift.translate(offset.x(), offset.y());
     m_contentNode->setMatrix(shift);
     const LayoutKey key{m_view.zoom(), width(), dpr, m_pagesVersion};
-    if (key.zoom != m_layoutKey.zoom || key.width != m_layoutKey.width || key.dpr != m_layoutKey.dpr ||
-        key.pages != m_layoutKey.pages) {
+    if (key != m_layoutKey) {
         m_layoutKey = key;
         ++m_layoutStamp;
     }
@@ -799,21 +790,6 @@ QSGNode *NoteView::updatePaintNode(QSGNode *old, UpdatePaintNodeData *) {
 
 // --- Live layer -------------------------------------------------------------
 
-QRectF NoteView::strokeScreenRect(int from) const {
-    if (!m_stroke || !m_doc || m_stroke->samples.isEmpty())
-        return {};
-    const int index = m_doc->indexOf(m_strokePage);
-    QRectF r;
-    for (int i = std::max(0, from); i < m_stroke->samples.size(); ++i) {
-        const QPointF pt = m_stroke->point(i);
-        r = r.isNull() ? QRectF(pt, QSizeF(0.01, 0.01)) : r.united(QRectF(pt, QSizeF(0.01, 0.01)));
-    }
-    const double reach = Ink::radiusFor(m_stroke->tool, m_stroke->width, 1.0) + 1;
-    r.adjust(-reach, -reach, reach, reach);
-    const QRectF page = m_view.pageScreenRect(index);
-    return QRectF(page.topLeft() + r.topLeft() * m_view.zoom(), r.size() * m_view.zoom()).adjusted(-2, -2, 2, 2);
-}
-
 void NoteView::drawLive(int from) {
     if (!m_stroke || !m_doc)
         return;
@@ -834,6 +810,7 @@ void NoteView::drawLive(int from) {
     tail.tool = m_stroke->tool;
     tail.width = m_stroke->width;
     tail.samples = m_stroke->samples.mid(std::max(0, from));
+    const QPainterPath path = Ink::outline(tail);
     QColor c = m_stroke->color;
     c.setAlpha(255);
     QImage &img = m_overlay->layer(m_stroke->tool, deviceRatio());
@@ -844,8 +821,8 @@ void NoteView::drawLive(int from) {
     lp.scale(m_view.zoom(), m_view.zoom());
     lp.setPen(Qt::NoPen);
     lp.setBrush(c);
-    lp.drawPath(*tail.path());
-    const QRectF b = tail.bounds();
+    lp.drawPath(path);
+    const QRectF b = path.boundingRect();
     const QRectF screen = QRectF(page.topLeft() + b.topLeft() * m_view.zoom(), b.size() * m_view.zoom())
                               .adjusted(-2, -2, 2, 2) & boundingRect();
     m_overlay->dirty |= screen;
@@ -866,24 +843,15 @@ void NoteView::maybeClearLive() {
     const double scale = targetScale();
     for (auto it = m_pending.begin(); it != m_pending.end(); ++it) {
         const int index = m_indexById.value(it.key(), -1);
-        if (index < 0)
-            continue;
-        const QRect range = tileRange(index, scale, 0);
-        const auto pt = m_tiles.value(it.key());
-        for (int ty = range.top(); ty <= range.bottom() && !range.isEmpty(); ++ty)
-            for (int tx = range.left(); tx <= range.right(); ++tx) {
-                bool ok = false;
-                for (const auto &t : pt.tiles)
-                    if (t.scale == scale && t.tx == tx && t.ty == ty && t.revision >= it.value())
-                        ok = true;
-                if (!ok)
-                    return;
-            }
+        if (index >= 0 && !tilesReady(it.key(), index, scale, it.value()))
+            return;
     }
     clearLive();
 }
 
 void NoteView::setHover(QPointF pos, bool visible) {
+    if (!visible && !m_overlay->hoverVisible)
+        return;
     const double r = Ink::EraserRadius * m_view.zoom();
     const double pad = r + 4;
     if (m_overlay->hoverVisible)
@@ -921,8 +889,8 @@ void NoteView::beginStroke(QPointF pos, double pressure, bool erase, Source sour
     m_stroke = std::make_shared<Stroke>();
     m_stroke->id = Document::newId();
     m_stroke->tool = m_tool;
-    m_stroke->color = activeColor(m_tool);
-    m_stroke->width = float(activeWidth(m_tool));
+    m_stroke->color = m_tool == Tool::Highlighter ? m_highlightColor : m_penColor;
+    m_stroke->width = float(m_tool == Tool::Highlighter ? m_highlightWidth : m_penWidth);
     m_smoothedPressure = pressure;
     m_stroke->samples.append({float(local.x()), float(local.y()), float(pressure)});
     drawLive(0);
@@ -957,15 +925,13 @@ void NoteView::endStroke() {
         m_stroke.reset();
         m_strokePage.reset();
         stroke->samples = Ink::simplify(stroke->samples, stroke->tool, stroke->width);
-        stroke->invalidate();
         m_doc->addStroke(page, stroke);
         // The layer keeps showing it until the tiles catch up.
         m_pending[page->id] = page->revision;
     } else if (m_gesture == Gesture::Erase && m_doc) {
         m_doc->endErase();
     }
-    m_gesture = Gesture::None;
-    m_source = Source::None;
+    cancelGesture();
 }
 
 void NoteView::eraseAlong(QPointF from, QPointF to) {
@@ -1004,7 +970,7 @@ void NoteView::panTo(QPointF pos) {
     const double dt = std::max<qint64>(1, m_panClock.restart());
     m_panVelocity = 0.7 * (d / double(dt)) + 0.3 * m_panVelocity;
     m_last = pos;
-    viewMoved();
+    viewMoved(d.y());
 }
 
 void NoteView::endPan() {
@@ -1012,6 +978,19 @@ void NoteView::endPan() {
     // lifted mid-swipe; a mouse drag stops where it's let go.
     if ((m_source == Source::Touch || m_source == Source::Stylus) && m_panClock.elapsed() < 60)
         startFling(m_panVelocity);
+    cancelGesture();
+}
+
+void NoteView::finishGesture() {
+    if (m_gesture == Gesture::Ink || m_gesture == Gesture::Erase)
+        endStroke();
+    else if (m_gesture == Gesture::Pan || m_gesture == Gesture::VerticalPan)
+        endPan();
+    else
+        cancelGesture();
+}
+
+void NoteView::cancelGesture() {
     m_gesture = Gesture::None;
     m_source = Source::None;
 }
@@ -1030,7 +1009,6 @@ void NoteView::startFling(QPointF velocity) {
 bool NoteView::scrollBy(double dx, double dy) {
     const QPointF before(m_view.panX(), m_view.scrollY());
     m_view.panBy(dx, dy);
-    managePaper(dy);
     return QPointF(m_view.panX(), m_view.scrollY()) != before || (dy < 0 && canGrowPaper());
 }
 
@@ -1085,11 +1063,10 @@ bool NoteView::eventFilter(QObject *watched, QEvent *event) {
     if (type == QEvent::TabletEnterProximity) {
         m_stylusNear = true;
         m_stylusClock.restart();
-    } else if (event->type() == QEvent::TabletLeaveProximity) {
+    } else if (type == QEvent::TabletLeaveProximity) {
         m_stylusNear = false;
         m_stylusClock.restart();
         setHover(m_overlay->hover, false);
-        setEraseEngaged(false);
     }
     return QQuickItem::eventFilter(watched, event);
 }
@@ -1129,17 +1106,13 @@ void NoteView::tabletEvent(QTabletEvent *e, QPointF pos) {
 
     switch (e->type()) {
     case QEvent::TabletPress:
-        if (m_source == Source::Touch || m_source == Source::Mouse) {
-            m_gesture = Gesture::None; // The pen wins over a resting palm.
-            m_source = Source::None;
-        }
+        if (m_source == Source::Touch || m_source == Source::Mouse)
+            cancelGesture(); // The pen wins over a resting palm.
         stopFling();
         m_stylusDown = true;
-        setEraseEngaged(erase);
         beginStroke(pos, pressure, erase, Source::Stylus);
         break;
     case QEvent::TabletMove:
-        setEraseEngaged(erase);
         if (m_stylusDown && m_source == Source::Stylus) {
             // Barrel button or flipping mid-stroke switches tools on the spot.
             const bool wantErase = erase || m_tool == Tool::Eraser;
@@ -1155,14 +1128,9 @@ void NoteView::tabletEvent(QTabletEvent *e, QPointF pos) {
         setHover(pos, erase || m_tool == Tool::Eraser);
         break;
     case QEvent::TabletRelease:
-        if (m_source == Source::Stylus) {
-            if (m_gesture == Gesture::Ink || m_gesture == Gesture::Erase)
-                endStroke();
-            else
-                endPan();
-        }
+        if (m_source == Source::Stylus)
+            finishGesture();
         m_stylusDown = false;
-        setEraseEngaged(e->pointerType() == QPointingDevice::PointerType::Eraser);
         break;
     default:
         break;
@@ -1193,18 +1161,15 @@ void NoteView::mouseReleaseEvent(QMouseEvent *e) {
     e->accept();
     if (!realMouse(e) || m_source != Source::Mouse)
         return;
-    if (m_gesture == Gesture::Ink || m_gesture == Gesture::Erase)
-        endStroke();
-    else
-        endPan();
+    finishGesture();
 }
 
 void NoteView::mouseUngrabEvent() {
     if (m_source == Source::Mouse) {
         if (m_gesture == Gesture::Ink || m_gesture == Gesture::Erase)
             endStroke();
-        m_gesture = Gesture::None;
-        m_source = Source::None;
+        else
+            cancelGesture();
     }
 }
 
@@ -1252,7 +1217,7 @@ void NoteView::wheelEvent(QWheelEvent *e) {
         m_wheelVelocity = 0.6 * (d / dt) + 0.4 * m_wheelVelocity;
     }
     scrollBy(d.x(), d.y());
-    viewMoved();
+    viewMoved(d.y());
 }
 
 void NoteView::touchEvent(QTouchEvent *e) {
@@ -1269,18 +1234,13 @@ void NoteView::touchEvent(QTouchEvent *e) {
 
     // Palm rejection: a hand resting while the pen writes never scrolls.
     if (touchBlocked() || m_source == Source::Stylus || m_source == Source::Mouse || m_touchIgnored) {
-        if (m_source == Source::Touch) {
-            m_gesture = Gesture::None;
-            m_source = Source::None;
-        }
+        if (m_source == Source::Touch)
+            cancelGesture();
         m_touchIgnored = !allUp;
         return;
     }
     if (allUp) {
-        if (m_gesture == Gesture::Pan)
-            endPan();
-        m_gesture = Gesture::None;
-        m_source = Source::None;
+        finishGesture();
         return;
     }
     if (active.size() >= 2) {
@@ -1312,10 +1272,8 @@ void NoteView::touchEvent(QTouchEvent *e) {
 }
 
 void NoteView::touchUngrabEvent() {
-    if (m_source == Source::Touch) {
-        m_gesture = Gesture::None;
-        m_source = Source::None;
-    }
+    if (m_source == Source::Touch)
+        cancelGesture();
     m_touchIgnored = false;
 }
 
@@ -1325,10 +1283,11 @@ void NoteView::flingFrame() {
     const double dt = std::clamp<double>(m_flingClock.restart(), 1, 50);
     // A fling into the end of a notebook rolls on into fresh paper; one that
     // meets any other edge stops there.
-    const bool moving = scrollBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
+    const double dy = m_flingVelocity.y() * dt;
+    const bool moving = scrollBy(m_flingVelocity.x() * dt, dy);
     // Same decay per millisecond whatever the refresh rate.
     m_flingVelocity *= std::pow(0.94, dt / 16.0);
     if (!moving || length(m_flingVelocity) < 0.02)
         m_flinging = false;
-    viewMoved();
+    viewMoved(dy);
 }

@@ -4,8 +4,6 @@
 #include <algorithm>
 #include <QRandomGenerator>
 
-#include "pdfstore.h"
-
 class Command {
 public:
     virtual ~Command() = default;
@@ -195,6 +193,11 @@ void Document::removePageRaw(const PagePtr &page) {
         emit pagesChanged();
 }
 
+void Document::run(std::unique_ptr<Command> command) {
+    command->redo(*this);
+    push(std::move(command));
+}
+
 void Document::push(std::unique_ptr<Command> command) {
     if (m_index < int(m_history.size())) {
         m_history.resize(m_index);
@@ -215,19 +218,15 @@ void Document::push(std::unique_ptr<Command> command) {
 
 // Infinite paper: whenever the last sheet has ink, a fresh one waits below.
 void Document::ensureTrailingPage() {
-    if (!m_pages.isEmpty() && m_pages.last()->hasInk()) {
-        m_pages.append(blankPage(m_pages.last()->size));
-        emit pagesChanged();
-    }
+    if (!m_pages.isEmpty() && m_pages.last()->hasInk())
+        appendPaper();
 }
 
 void Document::addStroke(const PagePtr &page, const StrokePtr &stroke) {
     if (!page || !stroke || stroke->samples.isEmpty())
         return;
     stroke->finalize();
-    auto cmd = std::make_unique<AddStroke>(page, stroke);
-    cmd->redo(*this);
-    push(std::move(cmd));
+    run(std::make_unique<AddStroke>(page, stroke));
 }
 
 void Document::beginErase() { m_pendingErase = std::make_unique<EraseStrokes>(); }
@@ -252,9 +251,7 @@ void Document::endErase() {
 bool Document::clearPage(const PagePtr &page) {
     if (!page || page->strokes.isEmpty())
         return false;
-    auto cmd = std::make_unique<ClearPage>(page);
-    cmd->redo(*this);
-    push(std::move(cmd));
+    run(std::make_unique<ClearPage>(page));
     return true;
 }
 
@@ -262,9 +259,7 @@ PagePtr Document::insertPage(int index) {
     const QSizeF size = m_pages.isEmpty() ? QSizeF(A4Width, A4Height)
                                           : m_pages[std::clamp<int>(index - 1, 0, m_pages.size() - 1)]->size;
     auto page = blankPage(size);
-    auto cmd = std::make_unique<AddPage>(page, index);
-    cmd->redo(*this);
-    push(std::move(cmd));
+    run(std::make_unique<AddPage>(page, index));
     return page;
 }
 

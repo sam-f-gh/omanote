@@ -99,7 +99,6 @@ ApplicationWindow {
             sourceComponent: Workspace {
                 LayoutMirroring.enabled: false
                 onHomeRequested: win.guarded(() => backend.closeDocument())
-                onSaveRequested: backend.save()
                 onClearRequested: win.requestClear()
             }
         }

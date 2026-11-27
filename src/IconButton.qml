@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 
 // A square, touch-sized chrome button with a themed icon.
 AbstractButton {

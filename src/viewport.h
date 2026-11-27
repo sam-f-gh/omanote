@@ -16,14 +16,12 @@ public:
 
     void setPages(const QList<QSizeF> &sizes);
     void setViewSize(QSizeF size);
-    QSizeF viewSize() const { return m_view; }
     int pageCount() const { return m_sizes.size(); }
 
     double zoom() const { return m_zoom; }
     double panX() const { return m_panX; }
     double scrollY() const { return m_scrollY; }
 
-    double docWidth() const { return m_docWidth; }
     double docHeight() const;
     double maxPanX() const;
     double maxScrollY() const;

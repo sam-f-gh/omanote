@@ -1,7 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
-import QtQuick.Layouts
 import Omanote
 
 // A document open: top bar, pages, the tool shelf, zoom, and a status line.
@@ -9,7 +7,6 @@ Item {
     id: workspace
     property alias view: canvas
     signal homeRequested()
-    signal saveRequested()
     signal clearRequested()
 
     function showStatus(message) {
@@ -24,7 +21,6 @@ Item {
         anchors { left: parent.left; right: parent.right; top: parent.top }
         view: canvas
         onHomeRequested: workspace.homeRequested()
-        onSaveRequested: workspace.saveRequested()
     }
 
     NoteView {
@@ -68,13 +64,14 @@ Item {
                     color: percent.hovered ? Qt.alpha(theme.foreground, 0.08) : "transparent"
                 }
                 contentItem: Label {
-                    text: Math.round(canvas.zoom * 100).toLocaleString(Qt.locale(), 'f', 0) + " %"
+                    // Reading translator.language makes the binding re-run on a
+                    // language switch, so the number takes the new locale's format.
+                    text: (translator.language, Math.round(canvas.zoom * 100).toLocaleString(Qt.locale(), 'f', 0) + " %")
                     color: theme.foreground
                     font.pixelSize: 13
                     font.features: { "tnum": 1 }
                     horizontalAlignment: Text.AlignHCenter
                     verticalAlignment: Text.AlignVCenter
-                    property var _lang: translator.language
                 }
             }
             IconButton { glyph: "plus"; tip: qsTr("Zoom in (Ctrl++)"); width: 36; height: 36; onClicked: canvas.zoomIn() }

@@ -2,52 +2,9 @@
 
 #include <QJsonArray>
 #include <QPainter>
-#include <QtMath>
 #include <algorithm>
 #include <cmath>
-
-float Stroke::radius(int i) const { return Ink::radiusFor(tool, width, samples[i].p); }
-
-std::shared_ptr<const QPainterPath> Stroke::path() const {
-    auto cached = m_path.load();
-    if (!cached) {
-        cached = std::make_shared<const QPainterPath>(Ink::outline(*this));
-        m_path.store(cached);
-    }
-    return cached;
-}
-
-void Stroke::releasePath() const { m_path.store(nullptr); }
-
-void Stroke::invalidate() {
-    releasePath();
-    m_finalized = false;
-}
-
-static QRectF splineBounds(const Stroke &stroke);
-
-QRectF Stroke::bounds() const {
-    if (m_finalized)
-        return m_bounds;
-    return splineBounds(*this);
-}
-
-void Stroke::finalize() {
-    m_finalized = false;
-    m_bounds = bounds();
-    m_finalized = true;
-}
-
-namespace Ink {
-
-float radiusFor(Tool tool, float width, float pressure) {
-    if (tool == Tool::Highlighter)
-        return width / 2;
-    // A gentle curve: light touches thin out, firm ones swell, and 0.5 is
-    // the nominal width so mouse strokes match the preset exactly.
-    const float p = std::clamp(pressure, 0.f, 1.f);
-    return width / 2 * (0.3f + 1.4f * p);
-}
+#include <initializer_list>
 
 namespace {
 struct Node {
@@ -91,8 +48,8 @@ void rdp(const QVector<Sample> &s, const QVector<float> &r, double tol, QVector<
 constexpr double Kappa = 0.5522847498;
 
 void addCircle(QPainterPath &path, QPointF c, double r) {
-    // Positive shoelace orientation in y-down space; quads below match it so
-    // nonzero filling never punches holes where shapes overlap.
+    // Positive shoelace orientation in y-down space; polygons below match it
+    // so nonzero filling never punches holes where shapes overlap.
     const double k = Kappa * r;
     path.moveTo(c.x() + r, c.y());
     path.cubicTo(c.x() + r, c.y() + k, c.x() + k, c.y() + r, c.x(), c.y() + r);
@@ -102,15 +59,21 @@ void addCircle(QPainterPath &path, QPointF c, double r) {
     path.closeSubpath();
 }
 
-void addQuad(QPainterPath &path, QPointF a, QPointF b, QPointF c, QPointF d) {
-    const double area = (a.x() * b.y() - b.x() * a.y()) + (b.x() * c.y() - c.x() * b.y()) +
-                        (c.x() * d.y() - d.x() * c.y()) + (d.x() * a.y() - a.x() * d.y());
+void addPolygon(QPainterPath &path, std::initializer_list<QPointF> pts) {
+    const auto *p = pts.begin();
+    const int n = int(pts.size());
+    double area = 0;
+    for (int i = 0; i < n; ++i) {
+        const QPointF &a = p[i], &b = p[(i + 1) % n];
+        area += a.x() * b.y() - b.x() * a.y();
+    }
+    if (std::abs(area) < 1e-9)
+        return;
+    path.moveTo(p[0]);
     if (area < 0)
-        std::swap(b, d);
-    path.moveTo(a);
-    path.lineTo(b);
-    path.lineTo(c);
-    path.lineTo(d);
+        for (int i = n - 1; i >= 1; --i) path.lineTo(p[i]);
+    else
+        for (int i = 1; i < n; ++i) path.lineTo(p[i]);
     path.closeSubpath();
 }
 
@@ -119,18 +82,6 @@ struct Body {
     bool valid = false;
     QPointF a1, b1, a2, b2;  // Start/end points on each tangent side.
 };
-
-void addTriangle(QPainterPath &path, QPointF a, QPointF b, QPointF c) {
-    const double area = (b.x() - a.x()) * (c.y() - a.y()) - (c.x() - a.x()) * (b.y() - a.y());
-    if (std::abs(area) < 1e-9)
-        return;
-    if (area < 0)
-        std::swap(b, c);
-    path.moveTo(a);
-    path.lineTo(b);
-    path.lineTo(c);
-    path.closeSubpath();
-}
 
 Body addCapsuleBody(QPainterPath &path, const Node &n0, const Node &n1) {
     const QPointF d = n1.pt - n0.pt;
@@ -142,7 +93,7 @@ Body addCapsuleBody(QPainterPath &path, const Node &n0, const Node &n1) {
     const QPointF u1(std::cos(theta + alpha), std::sin(theta + alpha));
     const QPointF u2(std::cos(theta - alpha), std::sin(theta - alpha));
     Body body{true, n0.pt + u1 * n0.r, n1.pt + u1 * n1.r, n0.pt + u2 * n0.r, n1.pt + u2 * n1.r};
-    addQuad(path, body.a1, body.b1, body.b2, body.a2);
+    addPolygon(path, {body.a1, body.b1, body.b2, body.a2});
     return body;
 }
 
@@ -159,9 +110,7 @@ QByteArray num(double v) {
     }
     return s == "-0" ? "0" : s;
 }
-}
 
-namespace {
 // The spline the outline follows, densified so curves read smooth at any
 // zoom. Hit testing walks the same nodes, so the eraser touches exactly what
 // is drawn even where fast strokes curve far from their raw samples.
@@ -185,21 +134,85 @@ QVector<Node> densify(const Stroke &stroke) {
     nodes.append({stroke.point(n - 1), stroke.radius(n - 1), true});
     return nodes;
 }
-}
-}
 
 // Exactly what the outline covers: the spline overshoots its samples on
 // sharp turns, so bounds come from the same nodes, never the raw samples.
-static QRectF splineBounds(const Stroke &stroke) {
+QRectF splineBounds(const Stroke &stroke) {
     QRectF r;
-    for (const auto &n : Ink::densify(stroke)) {
+    for (const auto &n : densify(stroke)) {
         const QRectF c(n.pt.x() - n.r, n.pt.y() - n.r, 2 * n.r, 2 * n.r);
         r = r.isNull() ? c : r.united(c);
     }
     return r.adjusted(-0.5, -0.5, 0.5, 0.5);
 }
 
+void paintOne(QPainter &painter, const Stroke &stroke) {
+    painter.save();
+    painter.setPen(Qt::NoPen);
+    painter.setRenderHint(QPainter::Antialiasing);
+    QColor c = stroke.color;
+    if (stroke.tool == Tool::Highlighter) {
+        c.setAlphaF(Ink::HighlightAlpha);
+        painter.setCompositionMode(QPainter::CompositionMode_Multiply);
+    }
+    painter.setBrush(c);
+    painter.drawPath(*stroke.path());
+    painter.restore();
+}
+
+double segmentDistance(QPointF a, QPointF b, QPointF c, QPointF d) {
+    auto pointSeg = [](QPointF p, QPointF a, QPointF b) {
+        const QPointF ab = b - a;
+        const double len2 = QPointF::dotProduct(ab, ab);
+        const double t = len2 > 0 ? std::clamp(QPointF::dotProduct(p - a, ab) / len2, 0.0, 1.0) : 0.0;
+        const QPointF q = a + ab * t - p;
+        return std::hypot(q.x(), q.y());
+    };
+    auto cross = [](QPointF o, QPointF a, QPointF b) {
+        return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x());
+    };
+    const double d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
+    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
+        return 0;
+    return std::min({pointSeg(a, c, d), pointSeg(b, c, d), pointSeg(c, a, b), pointSeg(d, a, b)});
+}
+}
+
+float Stroke::radius(int i) const { return Ink::radiusFor(tool, width, samples[i].p); }
+
+std::shared_ptr<const QPainterPath> Stroke::path() const {
+    auto cached = m_path.load();
+    if (!cached) {
+        cached = std::make_shared<const QPainterPath>(Ink::outline(*this));
+        m_path.store(cached);
+    }
+    return cached;
+}
+
+void Stroke::releasePath() const { m_path.store(nullptr); }
+
+QRectF Stroke::bounds() const {
+    if (m_finalized)
+        return m_bounds;
+    return splineBounds(*this);
+}
+
+void Stroke::finalize() {
+    m_finalized = false;
+    m_bounds = bounds();
+    m_finalized = true;
+}
+
 namespace Ink {
+
+float radiusFor(Tool tool, float width, float pressure) {
+    if (tool == Tool::Highlighter)
+        return width / 2;
+    // A gentle curve: light touches thin out, firm ones swell, and 0.5 is
+    // the nominal width so mouse strokes match the preset exactly.
+    const float p = std::clamp(pressure, 0.f, 1.f);
+    return width / 2 * (0.3f + 1.4f * p);
+}
 
 QVector<Sample> simplify(const QVector<Sample> &samples, Tool tool, float width, double tolerance) {
     if (samples.size() <= 2)
@@ -255,26 +268,12 @@ QPainterPath outline(const Stroke &stroke) {
     for (int i = 0; i + 1 < nodes.size(); ++i) {
         const Body body = addCapsuleBody(path, nodes[i], nodes[i + 1]);
         if (previous.valid && body.valid) {
-            addTriangle(path, nodes[i].pt, previous.b1, body.a1);
-            addTriangle(path, nodes[i].pt, previous.b2, body.a2);
+            addPolygon(path, {nodes[i].pt, previous.b1, body.a1});
+            addPolygon(path, {nodes[i].pt, previous.b2, body.a2});
         }
         previous = body;
     }
     return path;
-}
-
-void paintOne(QPainter &painter, const Stroke &stroke) {
-    painter.save();
-    painter.setPen(Qt::NoPen);
-    painter.setRenderHint(QPainter::Antialiasing);
-    QColor c = stroke.color;
-    if (stroke.tool == Tool::Highlighter) {
-        c.setAlphaF(HighlightAlpha);
-        painter.setCompositionMode(QPainter::CompositionMode_Multiply);
-    }
-    painter.setBrush(c);
-    painter.drawPath(*stroke.path());
-    painter.restore();
 }
 
 void paint(QPainter &painter, const QList<StrokePtr> &strokes) {
@@ -284,23 +283,6 @@ void paint(QPainter &painter, const QList<StrokePtr> &strokes) {
     for (const auto &s : strokes)
         if (s->tool != Tool::Highlighter)
             paintOne(painter, *s);
-}
-
-double segmentDistance(QPointF a, QPointF b, QPointF c, QPointF d) {
-    auto pointSeg = [](QPointF p, QPointF a, QPointF b) {
-        const QPointF ab = b - a;
-        const double len2 = QPointF::dotProduct(ab, ab);
-        const double t = len2 > 0 ? std::clamp(QPointF::dotProduct(p - a, ab) / len2, 0.0, 1.0) : 0.0;
-        const QPointF q = a + ab * t - p;
-        return std::hypot(q.x(), q.y());
-    };
-    auto cross = [](QPointF o, QPointF a, QPointF b) {
-        return (a.x() - o.x()) * (b.y() - o.y()) - (a.y() - o.y()) * (b.x() - o.x());
-    };
-    const double d1 = cross(c, d, a), d2 = cross(c, d, b), d3 = cross(a, b, c), d4 = cross(a, b, d);
-    if (((d1 > 0 && d2 < 0) || (d1 < 0 && d2 > 0)) && ((d3 > 0 && d4 < 0) || (d3 < 0 && d4 > 0)))
-        return 0;
-    return std::min({pointSeg(a, c, d), pointSeg(b, c, d), pointSeg(c, a, b), pointSeg(d, a, b)});
 }
 
 bool hits(const Stroke &stroke, QPointF a, QPointF b, double r) {

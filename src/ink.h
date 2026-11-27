@@ -54,7 +54,6 @@ struct Stroke {
     // Called once a stroke is committed: from then on it is immutable and
     // may be shared with render threads.
     void finalize();
-    void invalidate();
 
 private:
     PathCache m_path;
@@ -82,11 +81,9 @@ QPainterPath outline(const Stroke &stroke);
 
 // Highlighters first (multiply, translucent), then pens on top.
 void paint(QPainter &painter, const QList<StrokePtr> &strokes);
-void paintOne(QPainter &painter, const Stroke &stroke);
 
 // Does the eraser, swept from a to b with radius r, touch the stroke?
 bool hits(const Stroke &stroke, QPointF a, QPointF b, double r = EraserRadius);
-double segmentDistance(QPointF a, QPointF b, QPointF c, QPointF d);
 
 QJsonObject toJson(const Stroke &stroke);
 StrokePtr fromJson(const QJsonObject &object);

@@ -1,6 +1,5 @@
 import QtQuick
 import QtQuick.Controls
-import QtQuick.Controls.Material
 import QtQuick.Layouts
 
 // Context for the active tool: swatches and three widths, or Clear Page.
@@ -28,92 +27,95 @@ Pill {
         anchors.centerIn: parent
         spacing: 2
 
-        Repeater {
-            model: shelf.eraser ? [] : shelf.colors
-            AbstractButton {
-                id: swatch
-                required property string modelData
-                implicitWidth: 40; implicitHeight: 36
-                focusPolicy: Qt.NoFocus
-                // Long-press or double-tap opens the full grid.
-                onPressAndHold: grid.openFor(swatch)
-                onDoubleClicked: grid.openFor(swatch)
-                onClicked: shelf.pick(modelData)
-                contentItem: Item {
-                    Rectangle {
-                        anchors.centerIn: parent
-                        width: 26; height: 26; radius: 13
-                        color: swatch.modelData
-                        border.width: 1
-                        border.color: Qt.alpha(theme.foreground, 0.25)
+        ColumnLayout {
+            visible: !shelf.eraser
+            spacing: 2
+
+            Repeater {
+                model: shelf.colors
+                AbstractButton {
+                    id: swatch
+                    required property string modelData
+                    implicitWidth: 40; implicitHeight: 36
+                    focusPolicy: Qt.NoFocus
+                    // Long-press or double-tap opens the full grid.
+                    onPressAndHold: grid.openFor(swatch)
+                    onDoubleClicked: grid.openFor(swatch)
+                    onClicked: shelf.pick(modelData)
+                    contentItem: Item {
+                        Rectangle {
+                            anchors.centerIn: parent
+                            width: 26; height: 26; radius: 13
+                            color: swatch.modelData
+                            border.width: 1
+                            border.color: Qt.alpha(theme.foreground, 0.25)
+                        }
+                        Rectangle {
+                            anchors.centerIn: parent
+                            visible: Qt.colorEqual(shelf.current, swatch.modelData)
+                            width: 34; height: 34; radius: 17
+                            color: "transparent"
+                            border.width: 2
+                            border.color: theme.accent
+                        }
                     }
-                    Rectangle {
-                        anchors.centerIn: parent
-                        visible: Qt.colorEqual(shelf.current, swatch.modelData)
-                        width: 34; height: 34; radius: 17
-                        color: "transparent"
-                        border.width: 2
-                        border.color: theme.accent
-                    }
+                    background: null
                 }
-                background: null
             }
-        }
 
-        // A custom color the curated swatches don't include.
-        Rectangle {
-            visible: !shelf.eraser && !shelf.colors.some(c => Qt.colorEqual(c, shelf.current))
-            width: 26; height: 26; radius: 13
-            color: shelf.current
-            border.width: 2
-            border.color: theme.accent
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: 4; Layout.bottomMargin: 4
-        }
+            // A custom color the curated swatches don't include.
+            Rectangle {
+                visible: !shelf.colors.some(c => Qt.colorEqual(c, shelf.current))
+                width: 26; height: 26; radius: 13
+                color: shelf.current
+                border.width: 2
+                border.color: theme.accent
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 4; Layout.bottomMargin: 4
+            }
 
-        IconButton {
-            id: paletteButton
-            visible: !shelf.eraser
-            glyph: "palette"
-            tip: qsTr("More colors")
-            onClicked: grid.openFor(paletteButton)
-        }
+            IconButton {
+                id: paletteButton
+                glyph: "palette"
+                tip: qsTr("More colors")
+                onClicked: grid.openFor(paletteButton)
+            }
 
-        Rectangle {
-            visible: !shelf.eraser
-            width: 24; height: 1
-            color: Qt.alpha(theme.foreground, 0.12)
-            Layout.alignment: Qt.AlignHCenter
-            Layout.topMargin: 4; Layout.bottomMargin: 4
-        }
+            Rectangle {
+                width: 24; height: 1
+                color: Qt.alpha(theme.foreground, 0.12)
+                Layout.alignment: Qt.AlignHCenter
+                Layout.topMargin: 4; Layout.bottomMargin: 4
+            }
 
-        Repeater {
-            model: shelf.eraser ? [] : [0, 1, 2]
-            AbstractButton {
-                id: sizeButton
-                required property int modelData
-                readonly property bool selected: (shelf.highlighter ? backend.highlightSize : backend.penSize) === modelData
-                implicitWidth: 40; implicitHeight: 40
-                focusPolicy: Qt.NoFocus
-                hoverEnabled: true
-                onClicked: shelf.highlighter ? backend.highlightSize = modelData : backend.penSize = modelData
-                ToolTip.visible: hovered
-                ToolTip.delay: 600
-                ToolTip.text: [qsTr("Fine"), qsTr("Medium"), qsTr("Bold")][modelData]
-                background: Rectangle {
-                    radius: Math.min(8, theme.radius)
-                    color: sizeButton.selected ? Qt.alpha(theme.accent, 0.22)
-                         : sizeButton.hovered ? Qt.alpha(theme.foreground, 0.08) : "transparent"
-                }
-                contentItem: Item {
-                    Rectangle {
-                        anchors.centerIn: parent
-                        readonly property real d: shelf.highlighter ? [8, 12, 17][sizeButton.modelData]
-                                                                    : [4, 7, 12][sizeButton.modelData]
-                        width: d
-                        height: shelf.highlighter ? 8 : d
-                        radius: shelf.highlighter ? 2 : d / 2
-                        color: shelf.highlighter ? shelf.current : theme.foreground
+            Repeater {
+                model: [0, 1, 2]
+                AbstractButton {
+                    id: sizeButton
+                    required property int modelData
+                    readonly property bool selected: (shelf.highlighter ? backend.highlightSize : backend.penSize) === modelData
+                    implicitWidth: 40; implicitHeight: 40
+                    focusPolicy: Qt.NoFocus
+                    hoverEnabled: true
+                    onClicked: shelf.highlighter ? backend.highlightSize = modelData : backend.penSize = modelData
+                    ToolTip.visible: hovered
+                    ToolTip.delay: 600
+                    ToolTip.text: [qsTr("Fine"), qsTr("Medium"), qsTr("Bold")][modelData]
+                    background: Rectangle {
+                        radius: Math.min(8, theme.radius)
+                        color: sizeButton.selected ? Qt.alpha(theme.accent, 0.22)
+                             : sizeButton.hovered ? Qt.alpha(theme.foreground, 0.08) : "transparent"
+                    }
+                    contentItem: Item {
+                        Rectangle {
+                            anchors.centerIn: parent
+                            readonly property real d: shelf.highlighter ? [8, 12, 17][sizeButton.modelData]
+                                                                        : [4, 7, 12][sizeButton.modelData]
+                            width: d
+                            height: shelf.highlighter ? 8 : d
+                            radius: shelf.highlighter ? 2 : d / 2
+                            color: shelf.highlighter ? shelf.current : theme.foreground
+                        }
                     }
                 }
             }
