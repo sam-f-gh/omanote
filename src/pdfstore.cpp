@@ -253,10 +253,10 @@ void addInk(QPDF &q, QPDFPageObjectHelper &page, const QList<StrokePtr> &strokes
                          " re W n\n";
     for (const auto &s : strokes)
         if (s->tool == Tool::Highlighter)
-            content += "q /OmHL gs\n" + rgb(s->color) + Ink::pdfPath(*s->path()) + "f\nQ\n";
+            content += "q /OmHL gs\n" + rgb(s->color) + Ink::pdfPath(*s->path(false)) + "f\nQ\n";
     for (const auto &s : strokes)
         if (s->tool != Tool::Highlighter)
-            content += rgb(s->color) + Ink::pdfPath(*s->path()) + "f\n";
+            content += rgb(s->color) + Ink::pdfPath(*s->path(false)) + "f\n";
     content += "Q\n";
 
     QOH form = q.newStream(content.toStdString());

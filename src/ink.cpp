@@ -180,11 +180,12 @@ double segmentDistance(QPointF a, QPointF b, QPointF c, QPointF d) {
 
 float Stroke::radius(int i) const { return Ink::radiusFor(tool, width, samples[i].p); }
 
-std::shared_ptr<const QPainterPath> Stroke::path() const {
+std::shared_ptr<const QPainterPath> Stroke::path(bool cache) const {
     auto cached = m_path.load();
     if (!cached) {
         cached = std::make_shared<const QPainterPath>(Ink::outline(*this));
-        m_path.store(cached);
+        if (cache)
+            m_path.store(cached);
     }
     return cached;
 }

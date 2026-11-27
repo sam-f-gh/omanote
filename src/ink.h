@@ -46,7 +46,10 @@ struct Stroke {
     float radius(int i) const;
     // The filled outline. Safe to call from render threads: the cache is
     // swapped atomically, and it can be dropped to save memory any time.
-    std::shared_ptr<const QPainterPath> path() const;
+    // Without cache, a missing outline is built but not kept: saving walks
+    // every stroke in the document and mustn't pin all their outlines.
+    std::shared_ptr<const QPainterPath> path(bool cache = true) const;
+    bool hasCachedPath() const { return bool(m_path.load()); }
     void releasePath() const;
     // Covers the outline; cheap (from samples), so hit tests and tile
     // culling never need the path. Precomputed by finalize().

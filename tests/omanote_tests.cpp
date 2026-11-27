@@ -416,6 +416,21 @@ private slots:
         QCOMPARE(back->page(0)->strokes.size(), 1);
     }
 
+    void savingDoesNotPinOutlines() {
+        // Saving builds every stroke's outline; off-screen ones mustn't stay
+        // in memory afterwards.
+        QTemporaryDir dir;
+        std::unique_ptr<Document> doc(Document::createNote());
+        auto s = line({10, 10}, {200, 80});
+        doc->addStroke(doc->page(0), s);
+        s->releasePath();
+        QString error;
+        QVERIFY(doc->save(dir.path() + "/a.pdf", &error));
+        QVERIFY(!s->hasCachedPath());
+        std::unique_ptr<Document> back(Document::open(dir.path() + "/a.pdf", &error));
+        QCOMPARE(back->page(0)->strokes.size(), 1);
+    }
+
     void tileGridCoversPage() {
         const QSizeF page(595.28, 842);
         const double scale = 1.7;
