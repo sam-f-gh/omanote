@@ -12,6 +12,18 @@
 namespace {
 constexpr qint64 BackgroundBudget = 96ll << 20; // Bytes of cached PDF tiles.
 
+// Every pixel opaque white. Exits on the first other pixel, so a tile with
+// content costs next to nothing to check.
+bool isWhite(const QImage &image) {
+    for (int y = 0; y < image.height(); ++y) {
+        const auto *line = reinterpret_cast<const quint32 *>(image.constScanLine(y));
+        for (int x = 0; x < image.width(); ++x)
+            if (line[x] != 0xFFFFFFFFu)
+                return false;
+    }
+    return true;
+}
+
 template <typename A, typename B>
 bool sameTile(const A &a, const B &b) {
     return a.page == b.page && a.tx == b.tx && a.ty == b.ty && a.scale == b.scale;
@@ -149,11 +161,11 @@ bool TileRenderer::wanted(const Job &job) {
     return false;
 }
 
-QImage TileRenderer::cachedBackground(const BgKey &key) {
+std::optional<QImage> TileRenderer::cachedBackground(const BgKey &key) {
     QMutexLocker lock(&m_bgMutex);
     auto it = m_bg.find(key);
     if (it == m_bg.end())
-        return {};
+        return std::nullopt;
     m_bgOrder.removeOne(key);
     m_bgOrder.append(key);
     return *it;
@@ -208,25 +220,27 @@ void TileRenderer::run(Worker *worker) {
             }
             worker->docGeneration = generation;
         }
-        const QImage image = render(*worker, job);
+        bool blank = false;
+        const QImage image = render(*worker, job, blank);
         {
             QMutexLocker lock(&m_mutex);
             worker->busy = false;
         }
-        if (!image.isNull() && generation == m_generation)
+        if ((blank || !image.isNull()) && generation == m_generation)
             emit rendered(job.page, job.scale, job.tx, job.ty, job.revision, image, generation);
     }
 }
 
-QImage TileRenderer::render(Worker &worker, const Job &job) {
+QImage TileRenderer::render(Worker &worker, const Job &job, bool &blank) {
     const QRect px = tilePixels(job.pageSize, job.scale, job.tx, job.ty);
     if (px.isEmpty())
         return {};
     QImage image;
     if (job.source >= 0 && worker.doc && job.source < worker.doc->numPages()) {
         const BgKey key{job.source, job.tx, job.ty, qint64(std::llround(job.scale * 1e4))};
-        image = cachedBackground(key);
-        if (image.isNull()) {
+        if (const auto cached = cachedBackground(key)) {
+            image = *cached;
+        } else {
             std::unique_ptr<Poppler::Page> page = worker.doc->page(job.source);
             if (!page)
                 return {};
@@ -241,24 +255,29 @@ QImage TileRenderer::render(Worker &worker, const Job &job) {
             if (image.isNull() || abort(QVariant::fromValue(quintptr(&ctx))))
                 return {};
             image = image.convertToFormat(QImage::Format_ARGB32_Premultiplied);
+            // Margins and blank pages are plain white, like note paper: the
+            // sheet under the tiles already shows that, so keep no pixels.
+            if (isWhite(image))
+                image = QImage();
             storeBackground(key, image);
         }
-    } else {
+    }
+    if (image.isNull()) {
+        if (job.strokes.isEmpty()) {
+            blank = true;
+            return {};
+        }
         image = QImage(px.size(), QImage::Format_ARGB32_Premultiplied);
         image.fill(Qt::white);
     }
 
-    const QRectF area = tilePoints(job.pageSize, job.scale, job.tx, job.ty);
-    QList<StrokePtr> strokes;
-    for (const auto &s : job.strokes)
-        if (s->bounds().intersects(area))
-            strokes.append(s);
-    if (!strokes.isEmpty()) {
+    // The job's strokes are already just the ones that touch this tile.
+    if (!job.strokes.isEmpty()) {
         QPainter p(&image);
         p.translate(-px.x(), -px.y());
         p.scale(job.scale, job.scale);
         p.setClipRect(QRectF(QPointF(0, 0), job.pageSize));
-        Ink::paint(p, strokes);
+        Ink::paint(p, job.strokes);
     }
     return image;
 }

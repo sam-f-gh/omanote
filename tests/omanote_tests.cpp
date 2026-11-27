@@ -480,6 +480,35 @@ private slots:
         QCOMPARE(spy[1].at(5).value<QImage>(), spy[0].at(5).value<QImage>());
     }
 
+    void rendererSkipsPlainWhiteTiles() {
+        QTemporaryDir dir;
+        QString error;
+        const SourcePtr source = PdfSource::open(externalPdf(dir.path()), error);
+        QVERIFY(source);
+        TileRenderer renderer(2);
+        renderer.setPdf(source);
+        QSignalSpy spy(&renderer, &TileRenderer::rendered);
+        // The second page is blank: no pixels are worth a texture or a cache.
+        renderer.setJobs({TileRenderer::Job{2, 1, {595.28, 842}, 1.0, 0, 0, 1, {}}});
+        QTRY_COMPARE(spy.size(), 1);
+        QVERIFY(spy[0].at(5).value<QImage>().isNull());
+        QCOMPARE(renderer.cachedBytes(), 0);
+        // Ink on that white paper still gets a real tile.
+        auto s = line({10, 10}, {200, 10}, Tool::Pen, 1.0f);
+        s->finalize();
+        renderer.setJobs({TileRenderer::Job{2, 1, {595.28, 842}, 1.0, 0, 0, 2, {s}}});
+        QTRY_COMPARE(spy.size(), 2);
+        const QImage inked = spy[1].at(5).value<QImage>();
+        QVERIFY(!inked.isNull());
+        QVERIFY(inked.pixelColor(100, 10).value() < 80);
+        QVERIFY(inked.pixelColor(100, 100).value() > 240);
+        // A tile with PDF content is kept as before.
+        renderer.setJobs({TileRenderer::Job{1, 0, {595.28, 842}, 1.0, 0, 0, 1, {}}});
+        QTRY_COMPARE(spy.size(), 3);
+        QVERIFY(!spy[2].at(5).value<QImage>().isNull());
+        QVERIFY(renderer.cachedBytes() > 0);
+    }
+
     // --- Viewport ----------------------------------------------------------
     void viewportLocksAndRecenters() {
         Viewport v;

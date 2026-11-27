@@ -567,7 +567,7 @@ void NoteView::onRendered(quint64 page, double scale, int tx, int ty, int revisi
             return;
         t->image = image;
         t->revision = revision;
-        t->blank = false;
+        t->blank = image.isNull(); // Plain white PDF paper: the sheet shows it.
         ++t->serial;
         update();
         maybeClearLive();

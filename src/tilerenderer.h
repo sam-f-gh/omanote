@@ -9,6 +9,7 @@
 #include <QWaitCondition>
 #include <atomic>
 #include <memory>
+#include <optional>
 #include <vector>
 
 #include "ink.h"
@@ -57,6 +58,7 @@ public:
     static void hideInk(Poppler::Document &doc);
 
 signals:
+    // A null image means plain white paper with no ink: no texture needed.
     void rendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation);
 
 private:
@@ -76,9 +78,9 @@ private:
     };
 
     void run(Worker *worker);
-    QImage render(Worker &worker, const Job &job);
+    QImage render(Worker &worker, const Job &job, bool &blank);
     bool wanted(const Job &job);
-    QImage cachedBackground(const BgKey &key);
+    std::optional<QImage> cachedBackground(const BgKey &key);
     void storeBackground(const BgKey &key, const QImage &image);
     void clearBackgroundCache();
 
@@ -91,7 +93,8 @@ private:
     bool m_quit = false;
     std::vector<std::unique_ptr<Worker>> m_workers;
 
-    // Rendered PDF backgrounds, so ink edits don't re-run poppler.
+    // Rendered PDF backgrounds, so ink edits don't re-run poppler. A null
+    // image marks a plain white tile (a margin, a blank page): nothing to keep.
     QMutex m_bgMutex;
     QHash<BgKey, QImage> m_bg;
     QList<BgKey> m_bgOrder;
