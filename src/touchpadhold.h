@@ -1,10 +1,10 @@
 #pragma once
 
 #include <QObject>
+#include <memory>
 
-struct wl_registry;
-struct zwp_pointer_gestures_v1;
-struct zwp_pointer_gesture_hold_v1;
+class PointerGestures;
+class HoldGesture;
 
 // Fingers resting on the touchpad, from the Wayland pointer-gestures "hold"
 // gesture (libinput sends it the moment fingers land, before any motion).
@@ -17,24 +17,17 @@ class TouchpadHold : public QObject {
 
 public:
     static TouchpadHold *instance();
-    // The pointer appears with the first input; call when input arrives.
+    // Qt creates the pointer with the first input; call when touchpad input
+    // arrives. Free once bound.
     void ensure();
 
 signals:
-    void fingersDown(int fingers);
+    void fingersDown();
 
 private:
     explicit TouchpadHold(QObject *parent);
     ~TouchpadHold() override;
 
-    static void global(void *data, wl_registry *registry, uint32_t name, const char *interface, uint32_t version);
-    static void globalRemove(void *data, wl_registry *registry, uint32_t name);
-    static void holdBegin(void *data, zwp_pointer_gesture_hold_v1 *hold, uint32_t serial, uint32_t time,
-                          struct wl_surface *surface, uint32_t fingers);
-    static void holdEnd(void *data, zwp_pointer_gesture_hold_v1 *hold, uint32_t serial, uint32_t time,
-                        int32_t cancelled);
-
-    wl_registry *m_registry = nullptr;
-    zwp_pointer_gestures_v1 *m_gestures = nullptr;
-    zwp_pointer_gesture_hold_v1 *m_hold = nullptr;
+    std::unique_ptr<PointerGestures> m_gestures;
+    std::unique_ptr<HoldGesture> m_hold;
 };

@@ -1,5 +1,5 @@
 QT += core gui quick testlib dbus network
-CONFIG += c++17 testcase link_pkgconfig
+CONFIG += c++20 testcase link_pkgconfig
 PKGCONFIG += poppler-qt6 libqpdf
 TARGET = omanote_tests
 TEMPLATE = app

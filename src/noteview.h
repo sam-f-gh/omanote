@@ -102,7 +102,7 @@ private:
         int revision = -1;        // Ink revision shown; -1 = nothing yet.
         int requested = -1;       // Revision asked of the renderer.
         bool blank = false;       // Plain white paper: no texture needed.
-        QImage image;             // Waiting for upload, then dropped.
+        QImage image{};           // Waiting for upload, then dropped.
         quint64 serial = 0;       // Bumped per new image.
     };
     struct PageTiles {
@@ -122,8 +122,9 @@ private:
     void stopFling() { m_flinging = false; }
     void startFling(QPointF velocity);
     bool scrollBy(double dx, double dy);
+    void stopScrolling();
     bool canGrowPaper() const;
-    double paperZone() const;
+    void managePaper(double dy);
     void flingFrame();
     bool touchBlocked() const;
     void setHover(QPointF pos, bool visible);
@@ -131,7 +132,6 @@ private:
 
     void syncPages();
     void viewMoved();
-    void trimUnusedPaper();
     void zoomTo(double zoom, QPointF focus);
     void scheduleRenders();
     void onRendered(quint64 page, double scale, int tx, int ty, int revision, const QImage &image, int generation);

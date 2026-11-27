@@ -28,17 +28,11 @@ public:
     PathCache() = default;
     PathCache(const PathCache &) {}
     PathCache &operator=(const PathCache &) { store(nullptr); return *this; }
-#if defined(__cpp_lib_atomic_shared_ptr)
     std::shared_ptr<const QPainterPath> load() const { return m_value.load(); }
     void store(std::shared_ptr<const QPainterPath> p) const { m_value.store(std::move(p)); }
+
 private:
     mutable std::atomic<std::shared_ptr<const QPainterPath>> m_value;
-#else
-    std::shared_ptr<const QPainterPath> load() const { return std::atomic_load(&m_value); }
-    void store(std::shared_ptr<const QPainterPath> p) const { std::atomic_store(&m_value, std::move(p)); }
-private:
-    mutable std::shared_ptr<const QPainterPath> m_value;
-#endif
 };
 
 struct Stroke {

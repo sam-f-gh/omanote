@@ -209,10 +209,7 @@ NoteView::NoteView(QQuickItem *parent) : QQuickItem(parent) {
 
     connect(&m_renderer, &TileRenderer::rendered, this, &NoteView::onRendered);
     // Fingers landing on the touchpad stop a fling, before they even move.
-    connect(TouchpadHold::instance(), &TouchpadHold::fingersDown, this, [this] {
-        stopFling();
-        m_wheelVelocity = {};
-    });
+    connect(TouchpadHold::instance(), &TouchpadHold::fingersDown, this, &NoteView::stopScrolling);
     m_renderIdle.setSingleShot(true);
     m_renderIdle.setInterval(qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") > 0
                                  ? qEnvironmentVariableIntValue("OMANOTE_RENDER_IDLE_MS") : 30000);
@@ -362,7 +359,7 @@ void NoteView::geometryChange(const QRectF &newGeometry, const QRectF &oldGeomet
 }
 
 void NoteView::viewMoved() {
-    trimUnusedPaper();
+    managePaper(0);
     update();
     // Ink waiting on tiles was drawn for the old view; it's a few ms from
     // landing in the tiles, so just drop it rather than redraw it.
@@ -380,16 +377,32 @@ void NoteView::viewMoved() {
     }
 }
 
-// Blank paper only exists while you can see it: sheets at the end with no
-// ink are dropped once scrolled out of view below, so they never count as
-// pages (and a save never writes them). A sheet must sit a gap and a margin
-// past the bottom edge first, so removing it can't nudge the view.
-void NoteView::trimUnusedPaper() {
-    if (!m_doc || m_doc->pageCount() < 2 || m_needsInitialZoom)
+// Blank paper at the end of a notebook follows the view. Scrolling down
+// within half a screen of the end adds a sheet, ahead of the end so there's
+// no wall to hit; sheets beyond that same line below the view are dropped,
+// so they never count as pages (and a save never writes them). One line for
+// both, so a sheet just added is never trimmed straight back.
+void NoteView::managePaper(double dy) {
+    if (!m_doc || m_needsInitialZoom)
         return;
-    // A sheet goes once its top is more than the paper zone below the view
-    // (plus the gap and margin), well out of sight.
-    const double limit = m_view.toDoc({0, height() + paperZone()}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
+    const double zone = height() * 0.5;
+    if (dy < 0 && canGrowPaper() && m_view.maxScrollY() - m_view.scrollY() <= zone) {
+        // Only steady downward motion counts: jitter along the margin flips
+        // direction and resets it, so a page that fits on screen doesn't
+        // sprout paper by accident.
+        m_downPush -= dy;
+        if (m_downPush >= 24) {
+            m_downPush = 0;
+            m_doc->appendPaper();
+            return;
+        }
+    } else if (dy != 0) {
+        m_downPush = 0;
+    }
+
+    if (m_doc->pageCount() < 2)
+        return;
+    const double limit = m_view.toDoc({0, height() + zone}).y() + Viewport::Gap + Viewport::Pad / m_view.zoom();
     // Walk back from the end: only the tail can be trimmed.
     int keep = m_view.pageCount() - 1;
     while (keep > 0 && m_view.pageDocRect(keep).top() > limit)
@@ -399,6 +412,10 @@ void NoteView::trimUnusedPaper() {
     if (m_strokePage)
         keep = std::max(keep, m_doc->indexOf(m_strokePage));
     m_doc->trimPaperAfter(keep); // Re-enters via syncPages -> viewMoved; nothing left to trim then.
+}
+
+bool NoteView::canGrowPaper() const {
+    return m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 && m_doc->pages().last()->note;
 }
 
 void NoteView::itemChange(ItemChange change, const ItemChangeData &value) {
@@ -465,11 +482,7 @@ void NoteView::scheduleRenders() {
                     if (t.scale == scale && t.tx == tx && t.ty == ty)
                         tile = &t;
                 if (!tile) {
-                    Tile fresh;
-                    fresh.scale = scale;
-                    fresh.tx = tx;
-                    fresh.ty = ty;
-                    pt.tiles.append(fresh);
+                    pt.tiles.append(Tile{.scale = scale, .tx = tx, .ty = ty});
                     tile = &pt.tiles.last();
                     changed = true;
                 }
@@ -1012,39 +1025,19 @@ void NoteView::startFling(QPointF velocity) {
     update(); // Frames drive the fling from here.
 }
 
-// Every user scroll goes through here. Pushing past the end of a notebook
-// adds a fresh sheet, so there's always paper below; returns whether it did.
+// Every user scroll goes through here. Returns false at a hard edge:
+// nothing moved and no fresh paper can open up there.
 bool NoteView::scrollBy(double dx, double dy) {
+    const QPointF before(m_view.panX(), m_view.scrollY());
     m_view.panBy(dx, dy);
-    if (dy >= 0 || !canGrowPaper()) {
-        m_downPush = 0;
-        return false;
-    }
-    // Paper is added ahead of the end, while there's still room to scroll,
-    // so scrolling down never meets a wall. It takes a little steady
-    // downward motion near the end (jitter along the margin flips direction
-    // and resets it), so a page that fits on screen doesn't sprout paper by
-    // accident.
-    if (m_view.maxScrollY() - m_view.scrollY() > paperZone()) {
-        m_downPush = 0;
-        return false;
-    }
-    m_downPush += -dy;
-    if (m_downPush < 24)
-        return false;
-    m_downPush = 0;
-    m_doc->appendPaper();
-    return true;
+    managePaper(dy);
+    return QPointF(m_view.panX(), m_view.scrollY()) != before || (dy < 0 && canGrowPaper());
 }
 
-bool NoteView::canGrowPaper() const {
-    return m_doc && m_doc->pageCount() > 0 && m_doc->pageCount() < 2000 && m_doc->pages().last()->note;
+void NoteView::stopScrolling() {
+    stopFling();
+    m_wheelVelocity = {};
 }
-
-// How close to the end (in pixels of scroll left) fresh paper is added, and
-// how far below the view blank paper may sit before it's dropped again. One
-// number for both, so a sheet just added is never trimmed straight back.
-double NoteView::paperZone() const { return height() * 0.5; }
 
 // --- Input ------------------------------------------------------------------
 
@@ -1216,7 +1209,6 @@ void NoteView::mouseUngrabEvent() {
 }
 
 void NoteView::hoverMoveEvent(QHoverEvent *e) {
-    TouchpadHold::instance()->ensure(); // Free once bound; needs a pointer to exist.
     if (realMouse(e))
         setHover(e->position(), m_tool == Tool::Eraser);
 }
@@ -1238,8 +1230,7 @@ void NoteView::wheelEvent(QWheelEvent *e) {
     // like a finger on the screen. Mouse wheels (no phase) just step.
     switch (e->phase()) {
     case Qt::ScrollBegin:
-        stopFling();
-        m_wheelVelocity = {};
+        stopScrolling();
         m_wheelClock.restart();
         break;
     case Qt::ScrollEnd:
@@ -1332,14 +1323,12 @@ void NoteView::flingFrame() {
     if (!m_flinging)
         return;
     const double dt = std::clamp<double>(m_flingClock.restart(), 1, 50);
-    const double y = m_view.scrollY(), x = m_view.panX();
-    const bool grew = scrollBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
-    // Same decay per millisecond whatever the refresh rate.
-    m_flingVelocity *= std::pow(0.94, dt / 16.0);
     // A fling into the end of a notebook rolls on into fresh paper; one that
     // meets any other edge stops there.
-    const bool stuck = !grew && y == m_view.scrollY() && x == m_view.panX();
-    if (length(m_flingVelocity) < 0.02 || (stuck && !(m_flingVelocity.y() < 0 && canGrowPaper())))
+    const bool moving = scrollBy(m_flingVelocity.x() * dt, m_flingVelocity.y() * dt);
+    // Same decay per millisecond whatever the refresh rate.
+    m_flingVelocity *= std::pow(0.94, dt / 16.0);
+    if (!moving || length(m_flingVelocity) < 0.02)
         m_flinging = false;
     viewMoved();
 }

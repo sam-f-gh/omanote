@@ -1,7 +1,11 @@
-QT += core gui qml quick quickcontrols2 dbus concurrent network
+QT += core gui qml quick quickcontrols2 dbus concurrent network waylandclient
 
-CONFIG += c++17 release link_pkgconfig
-PKGCONFIG += poppler-qt6 libqpdf wayland-client
+CONFIG += c++20 release link_pkgconfig wayland-scanner
+PKGCONFIG += poppler-qt6 wayland-client
+# qpdf's headers need C++20 and its pkg-config cflags say so with -std=c++20;
+# keep that flag on the C++ side only (the generated Wayland code is C).
+QMAKE_CXXFLAGS += $$system(pkg-config --cflags libqpdf)
+LIBS += $$system(pkg-config --libs libqpdf)
 TARGET = omanote
 TEMPLATE = app
 
@@ -35,18 +39,6 @@ SOURCES += \
 
 RESOURCES += src/resources.qrc
 
-# Wayland protocol code for the touchpad hold gesture, generated at build
-# time from the system's wayland-protocols.
-WAYLAND_PROTOCOLS = $$system(pkg-config --variable=pkgdatadir wayland-protocols)
-WAYLAND_GESTURES = $$WAYLAND_PROTOCOLS/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml
-wlheader.input = WAYLAND_GESTURES
-wlheader.output = ${QMAKE_FILE_BASE}-client-protocol.h
-wlheader.commands = wayland-scanner client-header ${QMAKE_FILE_IN} ${QMAKE_FILE_OUT}
-wlheader.variable_out = HEADERS
-wlheader.CONFIG += target_predeps no_link
-wlcode.input = WAYLAND_GESTURES
-wlcode.output = ${QMAKE_FILE_BASE}-protocol.c
-wlcode.commands = wayland-scanner private-code ${QMAKE_FILE_IN} ${QMAKE_FILE_OUT}
-wlcode.variable_out = SOURCES
-QMAKE_EXTRA_COMPILERS += wlheader wlcode
-INCLUDEPATH += $$OUT_PWD
+# Touchpad hold gesture: Qt's wayland-scanner feature generates the protocol
+# code and C++ wrappers from the system's wayland-protocols at build time.
+WAYLANDCLIENTSOURCES += $$system(pkg-config --variable=pkgdatadir wayland-protocols)/unstable/pointer-gestures/pointer-gestures-unstable-v1.xml
